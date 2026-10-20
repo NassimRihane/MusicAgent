@@ -1,22 +1,23 @@
 # agent.py
 #
-# Step 3 — Interactive feedback agent (Azure OpenAI)
+# Step 3 — Interactive feedback agent (Ollama or Azure OpenAI)
 #
-# Uses your lab's Azure Enterprise Agreement — no personal billing.
-#
-# Configuration (set as environment variables before running):
-#   export AZURE_OPENAI_ENDPOINT="https://your-lab.openai.azure.com/"
-#   export AZURE_OPENAI_KEY="your-key-here"
-#   export AZURE_OPENAI_DEPLOYMENT="model-exemple"   # your deployment name
-#
-# Find these in the Azure Portal:
-#   Azure OpenAI resource → Keys and Endpoint
+# Providers:
+#   ollama (default) — local model, free. Requires the Ollama app running
+#                      and the model pulled:  ollama pull mistral
+#                      Optional: export OLLAMA_HOST="http://localhost:11434"
+#   azure            — your lab's Azure OpenAI deployment. Set:
+#                      export AZURE_OPENAI_ENDPOINT="https://your-lab.openai.azure.com/"
+#                      export AZURE_OPENAI_KEY="your-key-here"
+#                      export AZURE_OPENAI_DEPLOYMENT="model-exemple"
 #
 # Usage:
 #   python agent.py sessions/feedback_session_20260101_120000.json
 #   python agent.py sessions/feedback_session_20260101_120000.json --lang fr
+#   python agent.py sessions/feedback_session_20260101_120000.json --model llama3.1
+#   python agent.py sessions/feedback_session_20260101_120000.json --provider azure
 #   python agent.py sessions/feedback_session_20260101_120000.json --dry-run
-#       (prints the prompt that would be sent, without calling Azure)
+#       (prints the prompt that would be sent, without calling any model)
 
 
 import argparse
@@ -34,11 +35,15 @@ except ImportError:
 
 
 # ─────────────────────────────────────────────
-# 0. ARGUMENTS
+# 0. MODEL SELECTION & ARGUMENTS
 # ─────────────────────────────────────────────
+
+# Change these two lines to switch model (or use --provider / --model).
+PROVIDER = "ollama"     # "ollama" or "azure"
+MODEL    = "mistral"    # Ollama model name (see: ollama list)
  
 parser = argparse.ArgumentParser(
-    description="Interactive music feedback agent (Azure OpenAI)"
+    description="Interactive music feedback agent (Ollama or Azure OpenAI)"
 )
 parser.add_argument("feedback",
     help="Path to a feedback JSON file (output of feedback.py)")
@@ -48,6 +53,10 @@ parser.add_argument("--max-tokens", type=int, default=800,
     help="Maximum tokens per response (default: 800)")
 parser.add_argument("--dry-run", action="store_true",
     help="Print the system prompt and opening message without calling the API")
+parser.add_argument("--provider", default=PROVIDER, choices=["ollama", "azure"],
+    help=f"LLM provider (default: {PROVIDER})")
+parser.add_argument("--model", default=MODEL,
+    help=f"Ollama model name (default: {MODEL}); ignored for azure")
 args = parser.parse_args()
  
  
@@ -55,8 +64,32 @@ args = parser.parse_args()
 
 
 # ─────────────────────────────────────────────
-# 1. AZURE OPENAI CONFIGURATION
+# 1. PROVIDER CONFIGURATION
 # ─────────────────────────────────────────────
+
+def load_config(provider: str) -> dict:
+    """Return {provider, url, headers, model, timeout} for the chosen provider."""
+    if provider == "azure":
+        return load_azure_config()
+    return load_ollama_config()
+
+
+def load_ollama_config() -> dict:
+    """
+    Ollama exposes an OpenAI-compatible endpoint, so the request format is the
+    same as Azure's; only the URL and the 'model' field differ.
+    """
+    host = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+    if not host.startswith("http"):
+        host = f"http://{host}"
+    return {
+        "provider": "ollama",
+        "url":      f"{host}/v1/chat/completions",
+        "headers":  {"Content-Type": "application/json"},
+        "model":    args.model,
+        "timeout":  180,   # local models can be slow, especially the first call
+    }
+
  
 def load_azure_config() -> dict:
     """
@@ -89,7 +122,13 @@ def load_azure_config() -> dict:
     url = (f"{endpoint}/openai/deployments/{deployment}"
            f"/chat/completions?api-version={api_version}")
  
-    return {"url": url, "key": key, "deployment": deployment}
+    return {
+        "provider": "azure",
+        "url":      url,
+        "headers":  {"api-key": key, "Content-Type": "application/json"},
+        "model":    deployment,
+        "timeout":  30,
+    }
 
 
 
@@ -210,11 +249,13 @@ PRIORITY SUGGESTIONS:
 def call_model(config: dict, system_prompt: str,
                history: list, user_message: str) -> str:
     """
-    Send a chat completion request to Azure OpenAI.
+    Send a chat completion request (OpenAI format) to Ollama or Azure OpenAI.
  
-    The Azure OpenAI API mirrors the OpenAI format exactly, with two differences:
-    - URL:  {endpoint}/openai/deployments/{deployment}/chat/completions?api-version=...
-    - Auth: header "api-key" instead of "Authorization: Bearer ..."
+    Both accept the OpenAI chat format; they differ only by:
+    - URL:   Ollama {host}/v1/chat/completions
+             Azure  {endpoint}/openai/deployments/{deployment}/chat/completions?api-version=...
+    - Auth:  Azure needs an "api-key" header; Ollama needs none
+    - Model: Ollama needs a "model" field; Azure takes it from the URL
  
     The conversation history is included in full on every call because the
     API is stateless — the model has no memory between requests.
@@ -228,19 +269,19 @@ def call_model(config: dict, system_prompt: str,
         "max_tokens":  args.max_tokens,
         "temperature": 0.7,
     }
- 
-    headers = {
-        "api-key":      config["key"],
-        "Content-Type": "application/json",
-    }
+    if config["provider"] == "ollama":
+        payload["model"] = config["model"]
  
     try:
         resp = requests.post(config["url"], json=payload,
-                             headers=headers, timeout=30)
+                             headers=config["headers"], timeout=config["timeout"])
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
  
     except requests.exceptions.ConnectionError:
+        if config["provider"] == "ollama":
+            return ("[ERROR] Cannot reach Ollama. Start the Ollama app "
+                    "(or run: ollama serve) and check OLLAMA_HOST.")
         return ("[ERROR] Cannot reach Azure OpenAI. "
                 "Check AZURE_OPENAI_ENDPOINT and your internet connection.")
     except requests.exceptions.Timeout:
@@ -251,8 +292,11 @@ def call_model(config: dict, system_prompt: str,
             detail = resp.json().get("error", {}).get("message", "")
         except Exception:
             pass
-        return (f"[ERROR] Azure API returned HTTP {resp.status_code}. "
-                f"{detail or resp.text[:300]}")
+        hint = ""
+        if config["provider"] == "ollama" and resp.status_code == 404:
+            hint = f" (Is the model pulled? Run: ollama pull {config['model']})"
+        return (f"[ERROR] {config['provider']} API returned HTTP {resp.status_code}. "
+                f"{detail or resp.text[:300]}{hint}")
     except (KeyError, IndexError) as e:
         return f"[ERROR] Unexpected response format: {e}"
     except Exception as e:
@@ -318,7 +362,7 @@ def main():
         print(generate_opening(feedback, lang))
         return
 
-    config   = load_azure_config()
+    config   = load_config(args.provider)
     history       = []   # grows with each turn; sent in full on every API call
  
     meta   = feedback.get("meta", {})
@@ -330,11 +374,11 @@ def main():
     global_score = round(sum(scores) / len(scores)) if scores else 0
  
     print("=" * 60)
-    print("  Music Practice Agent  —  Azure OpenAI")
+    print(f"  Music Practice Agent  —  {config['provider']}")
     print(f"  Session    : {feedback_path.stem}")
     print(f"  Scale      : {meta.get('scale', '?')}  |  BPM: {meta.get('bpm', '?')}")
     print(f"  Score      : {global_score}/100")
-    print(f"  Deployment : {config['deployment']}")
+    print(f"  Model      : {config['model']}")
     print(f"  Language   : {lang}")
     print("  Type 'quit' or press Ctrl+C to end.")
     print("=" * 60)
@@ -382,7 +426,8 @@ def main():
         json.dump({
             "meta":       meta,
             "language":   lang,
-            "deployment": config["deployment"],
+            "provider":   config["provider"],
+            "model":      config["model"],
             "history":    history,
         }, f, indent=2, ensure_ascii=False)
     print(f"\nConversation saved: {log_path}")
