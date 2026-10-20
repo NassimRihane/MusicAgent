@@ -18,9 +18,12 @@ That is the main roadmap item (see below).
 
 ## Ground rules
 
-- **Never call Azure OpenAI.** The user has no Azure credits left. To test
-  the agent, use `python agent.py <feedback.json> --dry-run`, which prints the
-  prompt and makes no network call.
+- **Never call Azure OpenAI.** The user has no Azure credits left. The
+  default provider is local **Ollama** (`mistral` installed), which is free
+  and fine to call for tests. `--dry-run` prints the prompt and makes no call.
+- **The GitHub repo is public** (`NassimRihane/MusicAgent`). Never commit
+  `sessions/` (the user's recordings; it's gitignored), credentials or `.env`
+  files. Commit or push only when the user asks; never force-push.
 - **Don't overwrite files in `sessions/`.** They are the user's real
   recordings. Run tests on copies in a scratch directory (`feedback.py` and
   `chord_analysis.py` write their outputs next to their input).
@@ -32,18 +35,23 @@ That is the main roadmap item (see below).
 
 ## Environment
 
-- Intended interpreter: Python 3.11.9 (`.python-version`).
-- **`.venv311/` is broken.** It was copied from
-  `~/Desktop/Travail/Keio/Master/Code`, and its pyenv Python 3.11.9 no longer
-  exists. To rebuild it: `pyenv install 3.11.9`, create a new venv, then
-  `pip install -r requirements.txt`.
-- Only `/opt/homebrew/bin/python3` (3.14) and `/usr/bin/python3` (3.9) exist
-  on the machine. For quick tests, a throwaway 3.14 venv with `numpy librosa
-  soundfile music21 requests` works for every script except the real-time
-  ones (basic-pitch and the microphone need 3.11; stub them as needed).
-- The project is not a git repository yet.
+- Run everything with **`.venv311/bin/python`** (Python 3.11 from Homebrew,
+  `/opt/homebrew/bin/python3.11`). Rebuilt on 2026-10-20 from
+  `requirements.txt`; verified that basic-pitch loads and transcribes.
+- **Python 3.11 is required.** On macOS, basic-pitch 0.4.0 uses CoreML only
+  on 3.11; on 3.12+ it requires `tensorflow-macos<2.15.1`, which doesn't exist.
+- `requirements.txt` pins `setuptools<81` (resampy imports `pkg_resources`)
+  and `chardet<6` (otherwise requests warns).
+- Ollama runs locally at `http://localhost:11434` (version 0.34.2); installed
+  model: `mistral`.
+- Git: `main` tracks `origin` = https://github.com/NassimRihane/MusicAgent
+  (public). `core.fileMode=false`, because every file on disk is mode 755.
+  No `gh` CLI is installed.
 
 ## Pipeline
+
+`main.py` runs every step in order (or `--session X.json` to skip
+recording); each step is still runnable on its own:
 
 ```
 transcription.py   mic → session_X.json (note events) + session_X.wav
@@ -55,10 +63,14 @@ transcription.py   mic → session_X.json (note events) + session_X.wav
 feedback.py        session_X.json (+ _chords.json, auto-detected)
                    → feedback_session_X.json/.txt  (notes / rhythm / harmony + suggestions)
         ▼
-agent.py           feedback_*.json → chat loop (Azure OpenAI) → conversation_feedback_*.json
+agent.py           feedback_*.json → chat loop (Ollama or Azure) → conversation_feedback_*.json
 ```
 
-Legacy prototypes, not part of the pipeline: `note_detection.py` (aubio,
+Model selection: the `PROVIDER` / `MODEL` constants at the top of `agent.py`,
+or `--provider ollama|azure` and `--model <name>` (also on `main.py`). Both
+providers use the OpenAI chat format (Ollama via `/v1/chat/completions`).
+
+Legacy prototypes in `prototypes/`, not part of the pipeline: `note_detection.py` (aubio,
 real-time pitch, C major hard-coded), `chord_detection.py` (live chord
 templates, C major only), `sim_proba.py` (a Bayesian simulation of learner
 motivation that could later feed a learner model).
@@ -82,6 +94,31 @@ motivation that could later feed a learner model).
   issues). Readers must accept both formats.
 
 ## Change log
+
+### 2026-10-20: Git, venv, Ollama, main.py
+
+- **Git:** the folder is now a clone of `NassimRihane/MusicAgent`. It was
+  attached with `git fetch` + `git reset origin/main` (working tree
+  untouched), and the local code was committed on top of the 3 existing
+  GitHub commits (no force-push). Before that, I checked that GitHub held no
+  code missing locally. `.gitignore` extended (`__pycache__`, `.venv*`,
+  `.DS_Store`, `.claude/settings.local.json`; `sessions/` was already there).
+- **venv:** `.venv311` rebuilt with Homebrew Python 3.11.17;
+  `requirements.txt` gained the `setuptools<81` and `chardet<6` pins.
+- **Prototypes** moved to `prototypes/` (`note_detection.py`,
+  `chord_detection.py`, `sim_proba.py`); nothing imported them.
+- **agent.py:** Ollama support (now the default). `PROVIDER` / `MODEL`
+  constants plus `--provider` / `--model`. `load_config()` returns
+  `{provider, url, headers, model, timeout}` (180 s timeout for Ollama, 30 s
+  for Azure). Connection and 404 errors give Ollama-specific hints. The
+  conversation log stores `provider` and `model` instead of `deployment`.
+  Tested with a real `mistral` conversation.
+- **main.py (new):** runs transcription → chord_analysis → (json_to_score
+  with `--score`) → feedback → agent as subprocesses. During a step, Ctrl+C
+  goes to the child (it stops the recording) while main.py keeps waiting.
+  After recording, it picks the newest `sessions/session_*.json`. Tested with
+  `--session` on a copy; **the recording path is untested** (needs the
+  microphone).
 
 ### 2026-10-10: Full review and bug-fix pass
 
@@ -176,9 +213,9 @@ inference (tested with stubs). Azure calls were never tested (by design).
 
 ## Roadmap
 
-0. **Foundations:** rebuild the venv; `git init`; move the prototypes into
-   `prototypes/`; one command for the whole pipeline; an LLM provider
-   abstraction (Azure is unavailable; consider a local Ollama model); tests.
+0. **Foundations:** ~~venv, git, prototypes folder, main.py, Ollama~~
+   (done 2026-10-20). Remaining: automated tests; move argparse into
+   `main()` so modules can be imported.
 1. **Reliable measurement:** run basic-pitch offline on the full WAV after
    each session; real tempo from beat tracking; validate on MAESTRO.
 2. **Expressive features, per phrase:** tempo curve and rubato, dynamics

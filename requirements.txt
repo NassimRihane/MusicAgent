@@ -6,5 +6,9 @@ basic-pitch==0.4.0
 sounddevice==0.5.5
 soundfile==0.13.1
 requests==2.32.5
+# resampy (needed by basic-pitch) imports pkg_resources, removed in setuptools 81
+setuptools<81
+# requests 2.32 warns with chardet>=6 (pulled in by music21)
+chardet<6
 # Only for the note_detection.py prototype:
 # aubio
