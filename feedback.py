@@ -32,11 +32,12 @@ from collections import Counter
 # 0. ARGUMENTS
 # ─────────────────────────────────────────────
 
-parser = argparse.ArgumentParser(description="Pedagogical feedback interpreter")
-parser.add_argument("session", help="Path to a session JSON file (from transcription.py)")
-parser.add_argument("--chords", default=None, help="Path to a chord analysis JSON (from chord_analysis.py) - optional")
-parser.add_argument("--reference", default=None, help="Path to a reference session JSON to compare against - optional")
-args = parser.parse_args()
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Pedagogical feedback interpreter")
+    parser.add_argument("session", help="Path to a session JSON file (from transcription.py)")
+    parser.add_argument("--chords", default=None, help="Path to a chord analysis JSON (from chord_analysis.py) - optional")
+    parser.add_argument("--reference", default=None, help="Path to a reference session JSON to compare against - optional")
+    return parser.parse_args(argv)
 
 
 # ─────────────────────────────────────────────
@@ -552,7 +553,8 @@ def write_feedback_txt(feedback: dict, base_path: Path) -> Path:
 # 8. MAIN
 # ─────────────────────────────────────────────
 
-def main():
+def main(argv=None):
+    args = parse_args(argv)
     session_path = Path(args.session)
     session      = load_json(str(session_path))
     meta         = session.get("meta", {})

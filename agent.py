@@ -42,22 +42,23 @@ except ImportError:
 PROVIDER = "ollama"     # "ollama" or "azure"
 MODEL    = "mistral"    # Ollama model name (see: ollama list)
  
-parser = argparse.ArgumentParser(
-    description="Interactive music feedback agent (Ollama or Azure OpenAI)"
-)
-parser.add_argument("feedback",
-    help="Path to a feedback JSON file (output of feedback.py)")
-parser.add_argument("--lang", default="en", choices=["en", "fr"],
-    help="Conversation language (en or fr, default: en)")
-parser.add_argument("--max-tokens", type=int, default=800,
-    help="Maximum tokens per response (default: 800)")
-parser.add_argument("--dry-run", action="store_true",
-    help="Print the system prompt and opening message without calling the API")
-parser.add_argument("--provider", default=PROVIDER, choices=["ollama", "azure"],
-    help=f"LLM provider (default: {PROVIDER})")
-parser.add_argument("--model", default=MODEL,
-    help=f"Ollama model name (default: {MODEL}); ignored for azure")
-args = parser.parse_args()
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Interactive music feedback agent (Ollama or Azure OpenAI)"
+    )
+    parser.add_argument("feedback",
+        help="Path to a feedback JSON file (output of feedback.py)")
+    parser.add_argument("--lang", default="en", choices=["en", "fr"],
+        help="Conversation language (en or fr, default: en)")
+    parser.add_argument("--max-tokens", type=int, default=800,
+        help="Maximum tokens per response (default: 800)")
+    parser.add_argument("--dry-run", action="store_true",
+        help="Print the system prompt and opening message without calling the API")
+    parser.add_argument("--provider", default=PROVIDER, choices=["ollama", "azure"],
+        help=f"LLM provider (default: {PROVIDER})")
+    parser.add_argument("--model", default=MODEL,
+        help=f"Ollama model name (default: {MODEL}); ignored for azure")
+    return parser.parse_args(argv)
  
  
 
@@ -67,14 +68,14 @@ args = parser.parse_args()
 # 1. PROVIDER CONFIGURATION
 # ─────────────────────────────────────────────
 
-def load_config(provider: str) -> dict:
-    """Return {provider, url, headers, model, timeout} for the chosen provider."""
-    if provider == "azure":
-        return load_azure_config()
-    return load_ollama_config()
+def load_config(provider: str, model: str = MODEL, max_tokens: int = 800) -> dict:
+    """Return {provider, url, headers, model, timeout, max_tokens} for the chosen provider."""
+    config = load_azure_config() if provider == "azure" else load_ollama_config(model)
+    config["max_tokens"] = max_tokens
+    return config
 
 
-def load_ollama_config() -> dict:
+def load_ollama_config(model: str = MODEL) -> dict:
     """
     Ollama exposes an OpenAI-compatible endpoint, so the request format is the
     same as Azure's; only the URL and the 'model' field differ.
@@ -86,7 +87,7 @@ def load_ollama_config() -> dict:
         "provider": "ollama",
         "url":      f"{host}/v1/chat/completions",
         "headers":  {"Content-Type": "application/json"},
-        "model":    args.model,
+        "model":    model,
         "timeout":  180,   # local models can be slow, especially the first call
     }
 
@@ -266,7 +267,7 @@ def call_model(config: dict, system_prompt: str,
  
     payload = {
         "messages":    messages,
-        "max_tokens":  args.max_tokens,
+        "max_tokens":  config.get("max_tokens", 800),
         "temperature": 0.7,
     }
     if config["provider"] == "ollama":
@@ -346,7 +347,8 @@ def generate_opening(feedback: dict, lang: str) -> str:
 # 5. MAIN CONVERSATION LOOP
 # ─────────────────────────────────────────────
  
-def main():
+def main(argv=None):
+    args = parse_args(argv)
     feedback_path = Path(args.feedback)
     if not feedback_path.exists():
         print(f"ERROR: file not found — {feedback_path}")
@@ -362,7 +364,7 @@ def main():
         print(generate_opening(feedback, lang))
         return
 
-    config   = load_config(args.provider)
+    config   = load_config(args.provider, args.model, args.max_tokens)
     history       = []   # grows with each turn; sent in full on every API call
  
     meta   = feedback.get("meta", {})

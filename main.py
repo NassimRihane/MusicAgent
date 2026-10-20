@@ -27,25 +27,26 @@ from pathlib import Path
 # 0. ARGUMENTS
 # ─────────────────────────────────────────────
 
-parser = argparse.ArgumentParser(description="Record, analyse and discuss a practice session")
-parser.add_argument("--session", default=None,
-    help="Existing session JSON to analyse (skips recording)")
-# Recording options (passed to transcription.py)
-parser.add_argument("--scale",  default="C", help="Root note of the scale (e.g. C, G, F#)")
-parser.add_argument("--type",   default="major", choices=["major", "minor"], help="Scale type")
-parser.add_argument("--bpm",    type=float, default=60.0, help="Tempo in BPM")
-parser.add_argument("--device", type=int, default=None, help="Audio input device index")
-# Analysis options
-parser.add_argument("--no-chords", action="store_true", help="Skip chord analysis")
-parser.add_argument("--score",     action="store_true", help="Also export a MusicXML score")
-# Agent options (passed to agent.py)
-parser.add_argument("--lang",     default="en", choices=["en", "fr"], help="Conversation language")
-parser.add_argument("--provider", default=None, choices=["ollama", "azure"],
-    help="LLM provider (default: the one set in agent.py)")
-parser.add_argument("--model",    default=None, help="Ollama model (default: the one set in agent.py)")
-parser.add_argument("--dry-run",  action="store_true",
-    help="Print the agent prompt instead of calling the model")
-args = parser.parse_args()
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Record, analyse and discuss a practice session")
+    parser.add_argument("--session", default=None,
+        help="Existing session JSON to analyse (skips recording)")
+    # Recording options (passed to transcription.py)
+    parser.add_argument("--scale",  default="C", help="Root note of the scale (e.g. C, G, F#)")
+    parser.add_argument("--type",   default="major", choices=["major", "minor"], help="Scale type")
+    parser.add_argument("--bpm",    type=float, default=60.0, help="Tempo in BPM")
+    parser.add_argument("--device", type=int, default=None, help="Audio input device index")
+    # Analysis options
+    parser.add_argument("--no-chords", action="store_true", help="Skip chord analysis")
+    parser.add_argument("--score",     action="store_true", help="Also export a MusicXML score")
+    # Agent options (passed to agent.py)
+    parser.add_argument("--lang",     default="en", choices=["en", "fr"], help="Conversation language")
+    parser.add_argument("--provider", default=None, choices=["ollama", "azure"],
+        help="LLM provider (default: the one set in agent.py)")
+    parser.add_argument("--model",    default=None, help="Ollama model (default: the one set in agent.py)")
+    parser.add_argument("--dry-run",  action="store_true",
+        help="Print the agent prompt instead of calling the model")
+    return parser.parse_args(argv)
 
 
 ROOT         = Path(__file__).parent
@@ -86,7 +87,8 @@ def newest_session(since: float):
 # 2. MAIN
 # ─────────────────────────────────────────────
 
-def main():
+def main(argv=None):
+    args = parse_args(argv)
     # Step 1 — recording (or an existing session)
     if args.session:
         session = Path(args.session)

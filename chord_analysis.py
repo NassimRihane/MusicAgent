@@ -42,20 +42,21 @@ import librosa
 # 0. ARGUMENTS
 # ─────────────────────────────────────────────
 
-parser = argparse.ArgumentParser(
-    description="Post-session chord analysis (BiLSTM or librosa fallback)"
-)
-parser.add_argument("input",
-    help="Path to a session WAV or JSON file")
-parser.add_argument("--backend", default="auto",
-    choices=["auto", "bilstm", "librosa"],
-    help="Analysis backend: 'auto' (default: bilstm if trained weights exist, "
-         "else librosa), 'bilstm' or 'librosa' (template matching).")
-parser.add_argument("--segment-sec", type=float, default=0.5,
-    help="Librosa backend: chroma window size in seconds (default 0.5)")
-parser.add_argument("--hop-sec", type=float, default=0.25,
-    help="Librosa backend: hop between windows in seconds (default 0.25)")
-args = parser.parse_args()
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Post-session chord analysis (BiLSTM or librosa fallback)"
+    )
+    parser.add_argument("input",
+        help="Path to a session WAV or JSON file")
+    parser.add_argument("--backend", default="auto",
+        choices=["auto", "bilstm", "librosa"],
+        help="Analysis backend: 'auto' (default: bilstm if trained weights exist, "
+             "else librosa), 'bilstm' or 'librosa' (template matching).")
+    parser.add_argument("--segment-sec", type=float, default=0.5,
+        help="Librosa backend: chroma window size in seconds (default 0.5)")
+    parser.add_argument("--hop-sec", type=float, default=0.25,
+        help="Librosa backend: hop between windows in seconds (default 0.25)")
+    return parser.parse_args(argv)
 
 
 # ─────────────────────────────────────────────
@@ -143,13 +144,14 @@ def analyse_bilstm(audio: np.ndarray) -> list:
 # 5. BACKEND B — LIBROSA TEMPLATE MATCHING
 # ─────────────────────────────────────────────
 
-def analyse_librosa(audio: np.ndarray) -> list:
+def analyse_librosa(audio: np.ndarray, segment_sec: float = 0.5,
+                    hop_sec: float = 0.25) -> list:
     print("  Running librosa template-matching (no temporal context)...")
     t0 = time.time()
 
     sr          = SAMPLE_RATE
-    seg_samples = int(args.segment_sec * sr)
-    hop_samples = int(args.hop_sec     * sr)
+    seg_samples = int(segment_sec * sr)
+    hop_samples = int(hop_sec     * sr)
     events_raw  = []
 
     starts  = list(range(0, len(audio) - seg_samples, hop_samples))
@@ -217,8 +219,8 @@ def _merge_consecutive(events_raw: list) -> list:
 # 6. BACKEND SELECTION
 # ─────────────────────────────────────────────
 
-def run_analysis(audio: np.ndarray, wav_path: Path) -> list:
-    backend = args.backend
+def run_analysis(audio: np.ndarray, backend: str = "auto",
+                 segment_sec: float = 0.5, hop_sec: float = 0.25) -> list:
     if backend == "auto":
         from chord_model import WEIGHTS_PATH
         backend = "bilstm" if WEIGHTS_PATH.exists() else "librosa"
@@ -230,7 +232,7 @@ def run_analysis(audio: np.ndarray, wav_path: Path) -> list:
         except Exception as exc:
             print(f"  BiLSTM error: {exc}")
             print("  Falling back to librosa template-matching.")
-    return analyse_librosa(audio)
+    return analyse_librosa(audio, segment_sec, hop_sec)
 
 
 # ─────────────────────────────────────────────
@@ -350,7 +352,8 @@ def print_timeline(events: list, scale_pcs: set):
 # 9. MAIN
 # ─────────────────────────────────────────────
 
-def main():
+def main(argv=None):
+    args = parse_args(argv)
     input_path = Path(args.input)
 
     if input_path.suffix.lower() == ".json":
@@ -384,7 +387,7 @@ def main():
     print("=" * 60)
 
     audio  = load_audio(wav_path)
-    events = run_analysis(audio, wav_path)
+    events = run_analysis(audio, args.backend, args.segment_sec, args.hop_sec)
 
     if not events:
         print("  No chords detected.")
