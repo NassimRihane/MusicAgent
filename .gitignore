@@ -1,3 +1,15 @@
 # Sessions and results of transcriptions
 
 sessions/
+
+# Python
+__pycache__/
+*.pyc
+.venv*/
+venv/
+
+# macOS
+.DS_Store
+
+# Claude Code local settings
+.claude/settings.local.json

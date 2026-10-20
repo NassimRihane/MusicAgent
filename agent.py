@@ -15,6 +15,8 @@
 # Usage:
 #   python agent.py sessions/feedback_session_20260101_120000.json
 #   python agent.py sessions/feedback_session_20260101_120000.json --lang fr
+#   python agent.py sessions/feedback_session_20260101_120000.json --dry-run
+#       (prints the prompt that would be sent, without calling Azure)
 
 
 import argparse
@@ -44,6 +46,8 @@ parser.add_argument("--lang", default="en", choices=["en", "fr"],
     help="Conversation language (en or fr, default: en)")
 parser.add_argument("--max-tokens", type=int, default=800,
     help="Maximum tokens per response (default: 800)")
+parser.add_argument("--dry-run", action="store_true",
+    help="Print the system prompt and opening message without calling the API")
 args = parser.parse_args()
  
  
@@ -137,6 +141,14 @@ Les données d'analyse de la session sont intégrées ci-dessous.
 """
 
 
+def _first(d: dict, *keys, default="no data"):
+    """Return the first present key (older feedback files misspell some keys)."""
+    for k in keys:
+        if d.get(k):
+            return d[k]
+    return default
+
+
 def build_system_prompt(feedback: dict, lang: str) -> str:
     """Build the system prompt with session analysis embedded."""
     base    = SYSTEM_PROMPT_FR if lang == "fr" else SYSTEM_PROMPT_EN
@@ -167,12 +179,12 @@ GLOBAL SCORE : {global_score}/100
 NOTE ACCURACY ({notes.get("score", "N/A")}/100):
   Total notes     : {notes.get("total_notes", 0)}
   In scale        : {notes.get("in_scale_count", 0)} ({round(notes.get("in_scale_ratio", 0)*100)}%)
-  Assessment      : {notes.get("assessment", notes.get("status", "no data"))}
+  Assessment      : {_first(notes, "assessment", "assessement", "status")}
   Frequent errors : {errors_str}
-  Avg confidence  : {notes.get("avg_confidence", "?")}
+  Avg loudness    : {notes.get("avg_velocity", "?")} (MIDI velocity, 0-127)
  
 RHYTHM ({rhythm.get("timing_score", "N/A")}/100):
-  Assessment      : {rhythm.get("timing_assessment", rhythm.get("status", "no data"))}
+  Assessment      : {_first(rhythm, "timing_assessment", "timing_assessement", "status")}
   Hesitations     : {rhythm.get("hesitation_count", 0)}
   Main note values: {vals_str}
   Avg IOI deviation: {rhythm.get("avg_ioi_deviation", "?")}
@@ -298,9 +310,15 @@ def main():
  
     feedback = json.loads(feedback_path.read_text(encoding="utf-8"))
     lang     = args.lang
-    config   = load_azure_config()
  
     system_prompt = build_system_prompt(feedback, lang)
+    if args.dry_run:
+        print(system_prompt)
+        print("--- OPENING MESSAGE ---")
+        print(generate_opening(feedback, lang))
+        return
+
+    config   = load_azure_config()
     history       = []   # grows with each turn; sent in full on every API call
  
     meta   = feedback.get("meta", {})
@@ -328,9 +346,11 @@ def main():
     print(f"{you_label}: {opening}\n")
  
     response = call_model(config, system_prompt, history, opening)
+    print(f"Agent: {response}\n")
+    if response.startswith("[ERROR]"):
+        sys.exit(1)
     history.append({"role": "user",      "content": opening})
     history.append({"role": "assistant", "content": response})
-    print(f"Agent: {response}\n")
  
     # Conversation loop
     prompt_str = "Vous : " if lang == "fr" else "You  : "
@@ -350,9 +370,11 @@ def main():
             break
  
         response = call_model(config, system_prompt, history, user_input)
+        print(f"\nAgent: {response}\n")
+        if response.startswith("[ERROR]"):
+            continue  # keep errors out of the history sent to the model
         history.append({"role": "user",      "content": user_input})
         history.append({"role": "assistant", "content": response})
-        print(f"\nAgent: {response}\n")
  
     # Save full conversation log
     log_path = feedback_path.parent / f"conversation_{feedback_path.stem}.json"

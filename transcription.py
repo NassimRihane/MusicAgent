@@ -13,7 +13,6 @@
 
 import argparse
 import queue
-import time
 import json
 from datetime import datetime
 from pathlib import Path
@@ -170,7 +169,7 @@ class TranscriptionBuffer:
     """
     Stores musical events detected in real time.
     Each event is a dict:
-        time        float   timestamp from session start (seconds)
+        time        float   onset from session start (seconds), aligned with the session WAV
         type        str     "note" or "chord"
         notes       list    list of note dicts (see below) — chords have >1
         duration    float   raw duration in seconds
@@ -182,15 +181,14 @@ class TranscriptionBuffer:
         name        str     e.g. "C4"
         pitch_class int     0–11
         in_scale    bool
-        confidence  float   basic-pitch confidence
+        velocity    int     loudness 0–127 estimated by basic-pitch
     """
 
     def __init__(self):
-        self.events     = []
-        self.start_time = time.time()
+        self.events = []
 
     def add(self, event: dict):
-        event["time"] = round(event["time"] - self.start_time, 3)
+        event["time"] = round(event["time"], 3)
         self.events.append(event)
 
     def to_json(self, path=None) -> dict:
@@ -271,18 +269,32 @@ def calibrate_noise_floor(device, duration_sec: float = 2.0):
 # 7. BASIC-PITCH ANALYSIS
 # ─────────────────────────────────────────────
 
-def analyse_segment(audio_segment: np.ndarray, segment_duration: float) -> list:
+_BP_MODEL = None
+
+def _get_basic_pitch_model():
+    """Load the basic-pitch model once; reloading it per segment is slow."""
+    global _BP_MODEL
+    if _BP_MODEL is None:
+        from basic_pitch.inference import Model
+        from basic_pitch import ICASSP_2022_MODEL_PATH
+        _BP_MODEL = Model(ICASSP_2022_MODEL_PATH)
+    return _BP_MODEL
+
+
+def analyse_segment(audio_segment: np.ndarray, segment_start: float) -> list:
     """
     Run basic-pitch on an audio segment and return a list of events.
 
     basic-pitch expects a file path, not a numpy array directly.
     We write the segment to a temporary WAV file, run prediction, then delete it.
 
+    segment_start is the segment's position in the session (seconds), so that
+    each event gets its real onset time rather than the time analysis finished.
+
     Returns a list of event dicts ready to be added to TranscriptionBuffer.
     """
     import tempfile, os, soundfile as sf
     from basic_pitch.inference import predict
-    from basic_pitch import ICASSP_2022_MODEL_PATH
 
     # Write segment to a temporary WAV file
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -292,7 +304,7 @@ def analyse_segment(audio_segment: np.ndarray, segment_duration: float) -> list:
     try:
         _, midi_data, _ = predict(
             tmp_path,
-            ICASSP_2022_MODEL_PATH,
+            _get_basic_pitch_model(),
             onset_threshold=args.onset_thresh,
             frame_threshold=args.frame_thresh,
             minimum_note_length=args.min_note_dur * 1000,   # ms
@@ -327,21 +339,27 @@ def analyse_segment(audio_segment: np.ndarray, segment_duration: float) -> list:
 
     events   = []
     group    = [raw_notes[0]]
-    now_wall = time.time()   # approximate wall time for the event timestamp
 
     for note in raw_notes[1:]:
         if note["start"] - group[0]["start"] <= CHORD_WINDOW:
             group.append(note)
         else:
-            events.append(_make_event(group, now_wall))
+            events.append(_make_event(group, segment_start))
             group = [note]
-    events.append(_make_event(group, now_wall))
+    events.append(_make_event(group, segment_start))
 
     return events
 
 
-def _make_event(note_group: list, wall_time: float) -> dict:
+def _make_event(note_group: list, segment_start: float) -> dict:
     """Convert a group of simultaneous notes into a transcription event dict."""
+    # basic-pitch can report the same pitch twice in one group; keep the loudest
+    by_pitch = {}
+    for n in note_group:
+        if n["midi"] not in by_pitch or n["velocity"] > by_pitch[n["midi"]]["velocity"]:
+            by_pitch[n["midi"]] = n
+    note_group = sorted(by_pitch.values(), key=lambda n: n["midi"])
+
     note_dicts = []
     for n in note_group:
         midi  = int(n["midi"])
@@ -352,7 +370,7 @@ def _make_event(note_group: list, wall_time: float) -> dict:
             "name":        name,
             "pitch_class": pc,
             "in_scale":    pc in scale_pc,
-            "confidence":  round(float(n["velocity"]) / 127.0, 2),
+            "velocity":    int(n["velocity"]),
         })
 
     duration_sec = float(np.mean([n["end"] - n["start"] for n in note_group]))
@@ -366,7 +384,7 @@ def _make_event(note_group: list, wall_time: float) -> dict:
         "duration": round(duration_sec, 3),
         "rhythm":   rhythm,
         "in_scale": all_in_scale,
-        "time":     wall_time,
+        "time":     segment_start + min(n["start"] for n in note_group),
     }
 
 
@@ -402,6 +420,8 @@ def main():
     in_sound         = False
     silence_dur      = 0.0  # tracks how long RMS has been below silence threshold
     full_recording   = []   # accumulates ALL audio for WAV export
+    samples_seen     = 0    # audio clock: position in the session WAV
+    segment_start    = 0.0  # session time (s) of the current segment's first block
     sessions_dir = Path(__file__).parent / "sessions"
     sessions_dir.mkdir(exist_ok=True)
     timestamp    = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -437,7 +457,11 @@ def main():
             while True:
                 data = audio_queue.get()
                 mono = np.squeeze(data).astype(np.float32)
-                now  = time.time()
+                # Use the audio clock, not wall time: analysis blocks this loop,
+                # so blocks are read late but their position in the stream is exact.
+                block_start   = samples_seen / SAMPLE_RATE
+                samples_seen += len(mono)
+                now           = block_start
 
                 # Accumulate everything for the session WAV
                 full_recording.append(mono)
@@ -466,6 +490,7 @@ def main():
                     in_sound        = True
                     silence_dur     = 0.0
                     last_onset_time = now
+                    segment_start   = block_start
                     audio_accum     = [mono]
                     audio_accum_dur = hop_dur
 
@@ -484,7 +509,7 @@ def main():
                     audio_segment = np.concatenate(audio_accum)
 
                     # Run basic-pitch on the full segment
-                    events = analyse_segment(audio_segment, audio_accum_dur)
+                    events = analyse_segment(audio_segment, segment_start)
 
                     for event in events:
                         buffer.add(event)

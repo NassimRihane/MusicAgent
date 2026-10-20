@@ -5,16 +5,18 @@
 # Reads a session WAV recording and returns a time-labelled chord sequence.
 # Two backends are supported — both require only numpy and librosa:
 #
-#   bilstm   (default)
+#   bilstm
 #     Built-in BiLSTM from chord_model.py.
-#     Template-initialised weights give musically coherent results
-#     without training. Improves if trained on annotated data.
+#     Only meaningful once trained (chord_model_weights.npz): untrained,
+#     its output is close to uniform noise.
 #     No external dependencies beyond numpy and librosa.
 #
-#   librosa  (fallback)
+#   librosa
 #     Frame-by-frame chroma template matching.
 #     No temporal context — each segment is classified independently.
 #     Simpler, faster, less accurate on ambiguous chords.
+#
+#   auto (default) uses bilstm if trained weights exist, librosa otherwise.
 #
 # Output files (written next to the input):
 #   session_XXX_chords.json   — machine-readable chord sequence
@@ -47,7 +49,8 @@ parser.add_argument("input",
     help="Path to a session WAV or JSON file")
 parser.add_argument("--backend", default="auto",
     choices=["auto", "bilstm", "librosa"],
-    help="Analysis backend: 'bilstm' (default) or 'librosa' (template matching).")
+    help="Analysis backend: 'auto' (default: bilstm if trained weights exist, "
+         "else librosa), 'bilstm' or 'librosa' (template matching).")
 parser.add_argument("--segment-sec", type=float, default=0.5,
     help="Librosa backend: chroma window size in seconds (default 0.5)")
 parser.add_argument("--hop-sec", type=float, default=0.25,
@@ -60,6 +63,10 @@ args = parser.parse_args()
 # ─────────────────────────────────────────────
 
 SAMPLE_RATE = 22050
+
+# Windows quieter than this fraction of the loudest window are labelled "N"
+# (no chord), so silence and room noise are not classified as chords.
+SILENCE_REL_RMS = 0.05
 
 CHORD_TYPE_INTERVALS = {
     "maj":  [0, 4, 7],
@@ -145,16 +152,21 @@ def analyse_librosa(audio: np.ndarray) -> list:
     hop_samples = int(args.hop_sec     * sr)
     events_raw  = []
 
-    for start_sample in range(0, len(audio) - seg_samples, hop_samples):
+    starts  = list(range(0, len(audio) - seg_samples, hop_samples))
+    rms     = [float(np.sqrt(np.mean(audio[s : s + seg_samples] ** 2))) for s in starts]
+    silence = max(rms, default=0.0) * SILENCE_REL_RMS
+
+    for start_sample, seg_rms in zip(starts, rms):
         segment    = audio[start_sample : start_sample + seg_samples]
         start_time = start_sample / sr
-        end_time   = (start_sample + seg_samples) / sr
+        # Windows overlap; each one labels only its own hop so segments tile
+        end_time   = (start_sample + hop_samples) / sr
 
         chroma      = librosa.feature.chroma_cqt(y=segment, sr=sr, bins_per_octave=36)
         chroma_mean = np.mean(chroma, axis=1)
         norm        = np.linalg.norm(chroma_mean)
 
-        if norm < 1e-6:
+        if norm < 1e-6 or seg_rms <= silence:
             events_raw.append({"start": round(start_time, 3),
                                 "end":   round(end_time, 3),
                                 "chord": "N", "score": 0.0})
@@ -206,7 +218,11 @@ def _merge_consecutive(events_raw: list) -> list:
 # ─────────────────────────────────────────────
 
 def run_analysis(audio: np.ndarray, wav_path: Path) -> list:
-    if args.backend in ("auto", "bilstm"):
+    backend = args.backend
+    if backend == "auto":
+        from chord_model import WEIGHTS_PATH
+        backend = "bilstm" if WEIGHTS_PATH.exists() else "librosa"
+    if backend == "bilstm":
         try:
             events = analyse_bilstm(audio)
             print(f"  BiLSTM analysis complete — {len(events)} segments found")
