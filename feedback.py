@@ -58,10 +58,15 @@ DIATONIC_CHORDS = {
     "minor": {0: "min", 2: "dim", 3: "maj", 5: "min", 7: "min", 8: "maj", 10: "maj"}
 }
 
+# Onsets closer than this are treated as simultaneous (one chord)
+SIMULTANEOUS_SEC = 0.05
+# Minimum number of inter-onset intervals needed to score timing
+MIN_IOIS = 3
+
 rhythm_BEAT_VALUE = {
-    "whole": 4.0, "half": 2.0, "quarter": 1.0, "eight": 0.5, "16th": 0.25,
-    "dotted-half": 3.0, "dotted-quarter": 1.5, "dotted-eight": 0.75,
-    "quarter-triplet": 2/3, "eight-triplet": 1/3,
+    "whole": 4.0, "half": 2.0, "quarter": 1.0, "eighth": 0.5, "16th": 0.25,
+    "dotted-half": 3.0, "dotted-quarter": 1.5, "dotted-eighth": 0.75,
+    "quarter-triplet": 2/3, "eighth-triplet": 1/3,
 }
 
 
@@ -98,13 +103,13 @@ def analyse_notes(events: list, scale_pc: set) -> dict:
     Evaluate note accuracy:
     - ration of notes in scale vs out of scale
     - most common out-of-scale notes (likely errors)
-    - avergae confidence from basic-pitch
+    - average loudness (MIDI velocity estimated by basic-pitch)
     - total note count
     """
     total_notes = 0
     in_scale_count = 0
     out_of_scale = []
-    confidences = []
+    velocities = []
     out_pc_counter = Counter()
 
     for event in events:
@@ -118,13 +123,18 @@ def analyse_notes(events: list, scale_pc: set) -> dict:
             else:
                 out_of_scale.append(n.get("name", "?"))
                 out_pc_counter[NOTES_NAMES[pc]] += 1
-            confidences.append(n.get("confidence", 1.0))
+            # Older sessions stored velocity/127 under the name "confidence"
+            vel = n.get("velocity")
+            if vel is None and "confidence" in n:
+                vel = n["confidence"] * 127
+            if vel is not None:
+                velocities.append(vel)
     
     if total_notes == 0:
-        return {"total": 0, "in_scale_ratio": 0.0, "status": "no_data"}
+        return {"total_notes": 0, "in_scale_ratio": 0.0, "status": "no_data"}
     
     ratio = in_scale_count / total_notes
-    avg_conf = sum(confidences)/len(confidences)
+    avg_vel = sum(velocities)/len(velocities) if velocities else None
 
     # Get the 3 most frequent errors
     frequent_errors = [{"note": name, "count": count} for name, count in out_pc_counter.most_common(3)]
@@ -133,13 +143,13 @@ def analyse_notes(events: list, scale_pc: set) -> dict:
 
     # Feedback readable by user
     if ratio >= 0.95:
-        assessement = "Excellent: almost all notes are in scale"
+        assessment = "Excellent: almost all notes are in scale"
     elif ratio >= 0.8:
-        assessement = "Good: few notes out of scale"
+        assessment = "Good: few notes out of scale"
     elif ratio >= 0.6:
-        assessement = "Mid: need a lot of correction"
+        assessment = "Mid: need a lot of correction"
     else:
-        assessement = "Work again: too many false notes"
+        assessment = "Work again: too many false notes"
 
     return{
         "total_notes": total_notes,
@@ -147,9 +157,9 @@ def analyse_notes(events: list, scale_pc: set) -> dict:
         "out_of_scale_count": total_notes - in_scale_count,
         "in_scale_ratio": round(ratio, 3),
         "score": score,
-        "assessement": assessement,
+        "assessment": assessment,
         "frequent_errors": frequent_errors,
-        "avg_confidence": round(avg_conf, 3)
+        "avg_velocity": round(avg_vel, 1) if avg_vel is not None else None
     }
 
 
@@ -189,21 +199,34 @@ def analyse_rhythm(events: list, bpm: float) -> dict:
         t = event.get("time", 0.0)
         if prev_time is not None:
             gap = t - prev_time
+            if gap < SIMULTANEOUS_SEC:
+                continue  # same onset (e.g. split chord), not a rhythmic interval
             if gap > beat_duration*2:
                 hesitations.append({
                     "at": round(t, 2),
                     "gap_sec": round(gap, 2),
                     "gap_beats": round(gap/beat_duration, 1),
                 })
-            
-            beats = gap/beat_duration
-            nearest = min(rhythm_BEAT_VALUE.values(), key=lambda b: abs(b-beats))
-            deviation = abs(beats - nearest)/nearest if nearest>0 else 0
-            ioi_deviations.append(deviation)
+            else:
+                beats = gap/beat_duration
+                nearest = min(rhythm_BEAT_VALUE.values(), key=lambda b: abs(b-beats))
+                deviation = abs(beats - nearest)/nearest if nearest>0 else 0
+                ioi_deviations.append(deviation)
         prev_time = t
     
-    avg_deviation = round(sum(ioi_deviations) / len(ioi_deviations), 3) \
-                    if ioi_deviations else 0.0
+    dominant_values = [{"value": v, "count": c} for v, c in rhythm_counts.most_common(4)]
+
+    if len(ioi_deviations) < MIN_IOIS:
+        # Too few measurable intervals: don't pretend the timing was steady
+        return {
+            "total_events": len(events),
+            "dominant_values": dominant_values,
+            "timing_assessment": "Not enough consecutive notes to judge timing",
+            "hesitation_count": len(hesitations),
+            "hesitations": hesitations[:5],
+        }
+
+    avg_deviation = round(sum(ioi_deviations) / len(ioi_deviations), 3)
     
     # Score penalise high deviation and hesitations
     timing_score = max(0, round((1 - avg_deviation)*100))
@@ -214,15 +237,13 @@ def analyse_rhythm(events: list, bpm: float) -> dict:
         timing_assessment = "Mostly steady"
     else:
         timing_assessment = "rhythm too irregular"
-    
-    dominant_values = [{"value": v, "count": c} for v, c in rhythm_counts.most_common(4)]
 
     return{
         "total_events": len(events),
         "dominant_values": dominant_values,
         "avg_ioi_deviation": avg_deviation,
         "timing_score": timing_score,
-        "timing_assessement": timing_assessment,
+        "timing_assessment": timing_assessment,
         "hesitation_count": len(hesitations),
         "hesitations": hesitations[:5]  # show only 5
     }
@@ -245,6 +266,13 @@ def analyse_harmony(chord_events: list, scale_pc: set,
         return {"status": "no_data",
                 "note": "Run chord_analysis.py to enable harmony feedback."}
  
+    # Ignore silence / unknown segments so they don't lower the score
+    chord_events = [e for e in chord_events
+                    if e.get("fit") not in ("no_chord", "unknown")
+                    and e.get("chord", "N") not in ("N", "X")]
+    if not chord_events:
+        return {"status": "no_data", "note": "No chords detected in the recording."}
+
     total    = len(chord_events)
     in_scale = sum(1 for e in chord_events if e.get("fit") == "in_scale")
     partial  = sum(1 for e in chord_events if e.get("fit") == "partial")
@@ -328,15 +356,22 @@ def _detect_progressions(chord_labels: list, root: str, scale_type: str) -> list
 # 6. GLOBAL SCORE AND PRIORITY SUGGESTION
 # ─────────────────────────────────────────────
 
-def build_suggestions(note_fb: dict, rhythm_fb: dict, harmony_fb: dict) -> list:
+def build_suggestions(note_fb: dict, rhythm_fb: dict, harmony_fb: dict, bpm: float) -> list:
     """
     Generate a prioritised list of actionable suggestions based on feedback
     Returned in order of priority
     """
     suggestions = []
 
+    if note_fb.get("status") == "no_data":
+        return [{
+            "priority": 1,
+            "area": "general",
+            "message": "No notes were detected. Check the microphone input level and play again."
+        }]
+
     note_score = note_fb.get("score", 100)
-    timing_score = rhythm_fb.get("timing_score", 100)
+    timing_score = rhythm_fb.get("timing_score")
     harmony_score = harmony_fb.get("harmony_score", 100)
 
 
@@ -344,10 +379,10 @@ def build_suggestions(note_fb: dict, rhythm_fb: dict, harmony_fb: dict) -> list:
     if note_score < 60:
         errors = note_fb.get("frequent_errors", [])
         error_names = ", ".join(e["note"] for e in errors[:2])
-        suggestions.appen({
+        suggestions.append({
             "priority": 1,
             "area": "notes",
-            "message": f"Focus on note accuracy, especially {error_names}"
+            "message": f"Focus on note accuracy, especially {error_names}. "
                        f"Review which notes belong to the scale"
         })
 
@@ -366,7 +401,7 @@ def build_suggestions(note_fb: dict, rhythm_fb: dict, harmony_fb: dict) -> list:
             "priority": 1,
             "area": "rhythm",
             "message":  "Work on rhythmic steadiness. Try practising with a metronome "
-                        f"at {int(60 * 0.7)} BPM (70% of current tempo) to build consistency."
+                        f"at {int(bpm * 0.7)} BPM (70% of current tempo) to build consistency."
         })
     
     elif hesitations > 2:
@@ -392,11 +427,11 @@ def build_suggestions(note_fb: dict, rhythm_fb: dict, harmony_fb: dict) -> list:
 
 
     # Encouragements
-    if note_score >= 90 and timing_score >= 80:
+    if note_score >= 90 and timing_score is not None and timing_score >= 80:
         suggestions.append({
             "priority": 3,
             "area": "encouragement",
-            "message": "Good work! Both notes and rhythm are solid"
+            "message": "Good work! Both notes and rhythm are solid. "
                         "Try increasing the tempo or add nuances"
         })
 
@@ -452,7 +487,7 @@ def write_feedback_txt(feedback: dict, base_path: Path) -> Path:
     else:
         lines.append(f"Score : {notes.get('score',0)}/100")
         lines.append(f"Notes played: {notes.get('total_notes', 0)}")
-        lines.append(f"In scale: {notes.get('in_scale_count', 0)}"
+        lines.append(f"In scale: {notes.get('in_scale_count', 0)} "
                     f"({round(notes.get('in_scale_ratio', 0)*100)}%)")
         lines.append(f"Assessment : {notes.get('assessment', '')}")
         if notes.get("frequent_errors"):
@@ -467,7 +502,7 @@ def write_feedback_txt(feedback: dict, base_path: Path) -> Path:
     if rhythm.get("status") == "no_data":
         lines.append("  No rhythm data available.")
     else:
-        lines.append(f"  Score       : {rhythm.get('timing_score', 0)}/100")
+        lines.append(f"  Score       : {rhythm.get('timing_score', 'N/A')}/100")
         lines.append(f"  Assessment  : {rhythm.get('timing_assessment', '')}")
         if rhythm.get("hesitation_count", 0) > 0:
             lines.append(f"  Hesitations : {rhythm['hesitation_count']}")
@@ -498,7 +533,7 @@ def write_feedback_txt(feedback: dict, base_path: Path) -> Path:
 
     # Suggestions
     lines.append("")
-    lines.append(" ── Suggesions ── ")
+    lines.append(" ── Suggestions ── ")
     for s in sugg:
         prefix = "  ★" if s["priority"] == 1 else "  ·"
         lines.append(f"{prefix} [{s['area'].upper()}] {s['message']}")
@@ -532,6 +567,8 @@ def main():
     # Load chord analysis if provided or auto-detected
     chord_events = []
     chord_path   = args.chords
+    if args.reference:
+        print("  Note: --reference is not implemented yet and is ignored.")
     if chord_path is None:
         auto = session_path.parent / f"{session_path.stem}_chords.json"
         if auto.exists():
@@ -554,7 +591,7 @@ def main():
     note_fb    = analyse_notes(events, scale_pc)
     rhythm_fb  = analyse_rhythm(events, bpm)
     harmony_fb = analyse_harmony(chord_events, scale_pc, scale_root, scale_type)
-    suggestions = build_suggestions(note_fb, rhythm_fb, harmony_fb)
+    suggestions = build_suggestions(note_fb, rhythm_fb, harmony_fb, bpm)
  
     feedback = {
         "meta":          meta,

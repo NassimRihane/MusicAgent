@@ -184,7 +184,7 @@ class LSTMCell:
         H = np.zeros(self.H, dtype=np.float32)
         C = np.zeros(self.H, dtype=np.float32)
         seq = range(T-1, -1, -1) if reverse else range(T)
-        out = np.zeros((T, self.h), dtype=np.float32)
+        out = np.zeros((T, self.H), dtype=np.float32)
 
         for t in seq:
             H, C = self.forward(X[t], H, C)
@@ -313,8 +313,8 @@ class ChordRecogniser:
             self.model.load(str(WEIGHTS_PATH))
             print(f"[chord_model] Loaded trained weights from {WEIGHTS_PATH.name}")
         else:
-            print("[chord_model] No trained weigths found - using template-initialised weigths")
-            print("[chord_model] To improve accuracy, train the model (see chord_model.py)")
+            print("[chord_model] WARNING: no trained weights found - output will not be meaningful")
+            print("[chord_model] Train the model first (see chord_model.py) or use the librosa backend")
 
     def _extract_chroma(self, audio: np.ndarray, sr: int) -> np.ndarray:
         """
@@ -437,12 +437,12 @@ def _merge_short_segments(segments: list, min_dur: float) -> list:
 # 6. LAZY LIBROSA IMPORT
 # ─────────────────────────────────────────────
 
-def librosa_chroma_cqt(audio, sr, hop_lenght):
+def librosa_chroma_cqt(audio, sr, hop_length):
     """
     Warper so librosa is only imported when this module is used
     """
     import librosa
-    return librosa.feature.chroma_cqt(y=audio, sr=sr, hop_length=hop_lenght, bins_per_octave=36)
+    return librosa.feature.chroma_cqt(y=audio, sr=sr, hop_length=hop_length, bins_per_octave=36)
 
 
 
