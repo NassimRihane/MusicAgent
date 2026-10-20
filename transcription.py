@@ -26,33 +26,34 @@ import librosa
 # 0. COMMAND-LINE ARGUMENTS
 # ─────────────────────────────────────────────
 
-parser = argparse.ArgumentParser(description="Real-time piano transcription")
-parser.add_argument("--scale",        default="C",
-                    help="Root note of the scale (e.g. C, G, F#)")
-parser.add_argument("--type",         default="major",
-                    choices=["major", "minor"], help="Scale type")
-parser.add_argument("--bpm",          type=float, default=60.0,
-                    help="Tempo in BPM")
-parser.add_argument("--device",       type=int, default=None,
-                    help="Index of the audio input device (see --list-devices)")
-parser.add_argument("--list-devices", action="store_true",
-                    help="List all available audio input devices and exit")
-parser.add_argument("--min-note-dur", type=float, default=0.05,
-                    help="Minimum note duration accepted from basic-pitch (seconds, default 0.05)")
-parser.add_argument("--onset-thresh", type=float, default=0.5,
-                    help="basic-pitch onset sensitivity 0–1 (default 0.5, lower = more notes)")
-parser.add_argument("--frame-thresh", type=float, default=0.3,
-                    help="basic-pitch frame sensitivity 0–1 (default 0.3)")
-args = parser.parse_args()
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Real-time piano transcription")
+    parser.add_argument("--scale",        default="C",
+                        help="Root note of the scale (e.g. C, G, F#)")
+    parser.add_argument("--type",         default="major",
+                        choices=["major", "minor"], help="Scale type")
+    parser.add_argument("--bpm",          type=float, default=60.0,
+                        help="Tempo in BPM")
+    parser.add_argument("--device",       type=int, default=None,
+                        help="Index of the audio input device (see --list-devices)")
+    parser.add_argument("--list-devices", action="store_true",
+                        help="List all available audio input devices and exit")
+    parser.add_argument("--min-note-dur", type=float, default=0.05,
+                        help="Minimum note duration accepted from basic-pitch (seconds, default 0.05)")
+    parser.add_argument("--onset-thresh", type=float, default=0.5,
+                        help="basic-pitch onset sensitivity 0–1 (default 0.5, lower = more notes)")
+    parser.add_argument("--frame-thresh", type=float, default=0.3,
+                        help="basic-pitch frame sensitivity 0–1 (default 0.3)")
+    return parser.parse_args(argv)
 
-if args.list_devices:
+
+def list_devices():
     print("\nAvailable audio input devices:\n")
     for i, d in enumerate(sd.query_devices()):
         if d["max_input_channels"] > 0:
             marker = " ◄ (default)" if i == sd.default.device[0] else ""
             print(f"  [{i:2d}]  {d['name']}{marker}")
     print("\nUse --device <index> to select a microphone.")
-    exit(0)
 
 
 # ─────────────────────────────────────────────
@@ -115,8 +116,6 @@ def build_scale(root_name: str, scale_type: str) -> set:
     root_pc   = NOTE_NAME_TO_PC[root_name]
     intervals = SCALE_INTERVALS[scale_type]
     return set((root_pc + i) % 12 for i in intervals)
-
-scale_pc = build_scale(args.scale, args.type)
 
 
 # ─────────────────────────────────────────────
@@ -184,8 +183,10 @@ class TranscriptionBuffer:
         velocity    int     loudness 0–127 estimated by basic-pitch
     """
 
-    def __init__(self):
+    def __init__(self, scale: str = "C major", bpm: float = 60.0):
         self.events = []
+        self.scale  = scale
+        self.bpm    = bpm
 
     def add(self, event: dict):
         event["time"] = round(event["time"], 3)
@@ -194,8 +195,8 @@ class TranscriptionBuffer:
     def to_json(self, path=None) -> dict:
         data = {
             "meta": {
-                "scale": f"{args.scale} {args.type}",
-                "bpm":   args.bpm,
+                "scale": self.scale,
+                "bpm":   self.bpm,
                 "date":  datetime.now().isoformat(),
             },
             "events": self.events,
@@ -281,7 +282,9 @@ def _get_basic_pitch_model():
     return _BP_MODEL
 
 
-def analyse_segment(audio_segment: np.ndarray, segment_start: float) -> list:
+def analyse_segment(audio_segment: np.ndarray, segment_start: float,
+                    scale_pc: set, bpm: float, onset_thresh: float = 0.5,
+                    frame_thresh: float = 0.3, min_note_dur: float = 0.05) -> list:
     """
     Run basic-pitch on an audio segment and return a list of events.
 
@@ -305,10 +308,10 @@ def analyse_segment(audio_segment: np.ndarray, segment_start: float) -> list:
         _, midi_data, _ = predict(
             tmp_path,
             _get_basic_pitch_model(),
-            onset_threshold=args.onset_thresh,
-            frame_threshold=args.frame_thresh,
-            minimum_note_length=args.min_note_dur * 1000,   # ms
-            midi_tempo=args.bpm,
+            onset_threshold=onset_thresh,
+            frame_threshold=frame_thresh,
+            minimum_note_length=min_note_dur * 1000,   # ms
+            midi_tempo=bpm,
         )
     finally:
         os.unlink(tmp_path)   # always clean up, even on error
@@ -344,14 +347,14 @@ def analyse_segment(audio_segment: np.ndarray, segment_start: float) -> list:
         if note["start"] - group[0]["start"] <= CHORD_WINDOW:
             group.append(note)
         else:
-            events.append(_make_event(group, segment_start))
+            events.append(_make_event(group, segment_start, scale_pc, bpm))
             group = [note]
-    events.append(_make_event(group, segment_start))
+    events.append(_make_event(group, segment_start, scale_pc, bpm))
 
     return events
 
 
-def _make_event(note_group: list, segment_start: float) -> dict:
+def _make_event(note_group: list, segment_start: float, scale_pc: set, bpm: float) -> dict:
     """Convert a group of simultaneous notes into a transcription event dict."""
     # basic-pitch can report the same pitch twice in one group; keep the loudest
     by_pitch = {}
@@ -374,7 +377,7 @@ def _make_event(note_group: list, segment_start: float) -> dict:
         })
 
     duration_sec = float(np.mean([n["end"] - n["start"] for n in note_group]))
-    rhythm       = quantize_duration(duration_sec, args.bpm)
+    rhythm       = quantize_duration(duration_sec, bpm)
     all_in_scale = all(n["in_scale"] for n in note_dicts)
     ev_type      = "chord" if len(note_dicts) > 1 else "note"
 
@@ -401,8 +404,15 @@ def audio_callback(indata, frames, time_info, status):
     audio_queue.put(indata.copy())
 
 
-def main():
+def main(argv=None):
     global RMS_ONSET_THRESHOLD, RMS_SILENCE_THRESHOLD
+    args = parse_args(argv)
+
+    if args.list_devices:
+        list_devices()
+        return
+
+    scale_pc = build_scale(args.scale, args.type)
 
     # Lazy-import basic-pitch here so startup errors are clear
     try:
@@ -413,7 +423,7 @@ def main():
         print("  Run: pip install basic-pitch")
         raise SystemExit(1)
 
-    buffer           = TranscriptionBuffer()
+    buffer           = TranscriptionBuffer(f"{args.scale} {args.type}", args.bpm)
     audio_accum      = []
     audio_accum_dur  = 0.0
     last_onset_time  = 0.0
@@ -509,7 +519,10 @@ def main():
                     audio_segment = np.concatenate(audio_accum)
 
                     # Run basic-pitch on the full segment
-                    events = analyse_segment(audio_segment, segment_start)
+                    events = analyse_segment(audio_segment, segment_start,
+                                             scale_pc, args.bpm,
+                                             args.onset_thresh, args.frame_thresh,
+                                             args.min_note_dur)
 
                     for event in events:
                         buffer.add(event)

@@ -28,8 +28,12 @@ That is the main roadmap item (see below).
   recordings. Run tests on copies in a scratch directory (`feedback.py` and
   `chord_analysis.py` write their outputs next to their input).
 - Match the existing style: section banners (`# ───── N. TITLE ─────`),
-  aligned assignments, a module header comment with usage, argparse at the
-  top of each script.
+  aligned assignments, a module header comment with usage. Each script has
+  `parse_args(argv=None)` in section 0 and `main(argv=None)`; **never read
+  CLI args at import time**, and pass values to functions as parameters.
+- **Run the tests after any code change:** `.venv311/bin/python -m pytest`
+  (~8 s), or `-m "not slow"` to skip real basic-pitch and the pipeline
+  subprocess. Add or update tests along with code changes.
 - The user writes in English and sometimes French; the agent supports
   `--lang en|fr`.
 
@@ -47,6 +51,24 @@ That is the main roadmap item (see below).
 - Git: `main` tracks `origin` = https://github.com/NassimRihane/MusicAgent
   (public). `core.fileMode=false`, because every file on disk is mode 755.
   No `gh` CLI is installed.
+
+## Tests
+
+`tests/`, one file per module; config in `pytest.ini`; `pytest` is in
+`requirements-dev.txt`.
+
+- `conftest.py` blocks `requests.post` in every test (no Ollama or Azure
+  calls; agent tests install fakes that record the payload). It also
+  provides synthetic audio helpers (`tones`, `silence`) and session builders
+  (`event`, `make_session`, `write_json`). Tests write only to `tmp_path`.
+- `slow` marker: real basic-pitch on synthesised notes, and the full
+  `main.py --session … --dry-run` pipeline as subprocesses.
+- One **strict xfail** documents the rhythm-metric limitation (see Known
+  issues). When the metric is redesigned, it will XPASS and fail the run:
+  remove the xfail marker then.
+- Mutation-checked on 2026-10-20: reintroducing old bugs (`self.h`, the
+  `assessement` key, wall-clock timestamps, no skipping of simultaneous
+  onsets) makes tests fail.
 
 ## Pipeline
 
@@ -94,6 +116,27 @@ motivation that could later feed a learner model).
   issues). Readers must accept both formats.
 
 ## Change log
+
+### 2026-10-20 (b): Automated tests, argparse refactor
+
+- **Refactor:** module-level `parser`/`args` → `parse_args(argv=None)` +
+  `main(argv=None)` in all 6 scripts, so modules can be imported.
+  Signatures changed:
+  - transcription: `TranscriptionBuffer(scale, bpm)`,
+    `analyse_segment(audio, segment_start, scale_pc, bpm, onset_thresh,
+    frame_thresh, min_note_dur)`,
+    `_make_event(group, segment_start, scale_pc, bpm)`; `scale_pc` is no
+    longer a module global; `--list-devices` → `list_devices()`
+  - chord_analysis: `analyse_librosa(audio, segment_sec, hop_sec)`,
+    `run_analysis(audio, backend, segment_sec, hop_sec)`
+  - agent: `load_config(provider, model, max_tokens)` (`max_tokens` is
+    stored in the config), `load_ollama_config(model)`
+  CLI usage is unchanged (checked with `--help` and `--list-devices`).
+- **Tests:** 84 tests + 1 xfail across 6 files (see the Tests section).
+  Added `pytest.ini` and `requirements-dev.txt`.
+- `.gitignore`: the user added `.venv311*/` and `venv311/`; this is
+  redundant with `.venv*/` but harmless. The "10k changes" seen in VSCode
+  were a stale view from before the venv rules existed.
 
 ### 2026-10-20: Git, venv, Ollama, main.py
 
@@ -202,20 +245,23 @@ inference (tested with stubs). Azure calls were never tested (by design).
   (roadmap 1).
 - Note accuracy only means "in the key". Chromatic notes are counted as
   errors, and there is no reference score or alignment.
-- The rhythm metric (deviation from the nearest grid value) is crude. The
-  BPM is the one the user set, not the tempo they played.
+- The rhythm metric (deviation from the nearest grid value) is crude: with
+  10 grid values, the deviation almost never exceeds ~0.25. So "rhythm too
+  irregular" and the metronome suggestion (deviation > 0.4) practically
+  never trigger. Documented by the xfail
+  `test_rhythm_very_irregular_is_flagged`. The BPM is the one the user set,
+  not the tempo they played.
 - json_to_score.py inserts no rests, so the score ignores timing gaps.
 - Progression detection uses chord roots only, so repeated roots break the
   patterns.
 - Real-time segmentation drops audio before the RMS onset and blocks the
   loop during inference.
-- Module-level `argparse` makes scripts hard to import for tests.
 
 ## Roadmap
 
-0. **Foundations:** ~~venv, git, prototypes folder, main.py, Ollama~~
-   (done 2026-10-20). Remaining: automated tests; move argparse into
-   `main()` so modules can be imported.
+0. **Foundations:** ~~venv, git, prototypes folder, main.py, Ollama, tests,
+   argparse refactor~~ (all done 2026-10-20). Possible next step: CI
+   (GitHub Actions running `pytest -m "not slow"`).
 1. **Reliable measurement:** run basic-pitch offline on the full WAV after
    each session; real tempo from beat tracking; validate on MAESTRO.
 2. **Expressive features, per phrase:** tempo curve and rubato, dynamics

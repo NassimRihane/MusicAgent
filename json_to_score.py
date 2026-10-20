@@ -27,14 +27,15 @@ from music21 import stream, note, chord, meter, tempo, key, metadata, environmen
 # Arguments
 
 
-parser = argparse.ArgumentParser(description="Convert a session JSON file to sheet music")
-parser.add_argument("session",  help="Path to the session JSON file")
-parser.add_argument("--output", default="musicxml",
-                    choices=["musicxml", "pdf", "midi", "all"],
-                    help="Output format (default: musicxml)")
-parser.add_argument("--title",  default=None,
-                    help="Score title (defaults to the session filename)")
-args = parser.parse_args()
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Convert a session JSON file to sheet music")
+    parser.add_argument("session",  help="Path to the session JSON file")
+    parser.add_argument("--output", default="musicxml",
+                        choices=["musicxml", "pdf", "midi", "all"],
+                        help="Output format (default: musicxml)")
+    parser.add_argument("--title",  default=None,
+                        help="Score title (defaults to the session filename)")
+    return parser.parse_args(argv)
 
 
 
@@ -355,7 +356,8 @@ def export_score(score: stream.Score, base_path: Path, output_format: str):
 # Main
 
 
-def main():
+def main(argv=None):
+    args = parse_args(argv)
     session_path = Path(args.session)
     session      = load_session(str(session_path))
     meta         = session.get("meta", {})

@@ -39,3 +39,13 @@ The default model is set at the top of `agent.py` (`PROVIDER`, `MODEL`).
 | Chatbot | `agent.py` | `conversation_feedback_session_X.json` |
 
 Early experiments are in `prototypes/`.
+
+## Tests
+
+```bash
+.venv311/bin/pip install -r requirements-dev.txt
+.venv311/bin/python -m pytest                 # all tests (~10 s)
+.venv311/bin/python -m pytest -m "not slow"   # skip real-model / full-pipeline tests
+```
+
+Tests use synthesised audio and fake LLM responses: they need no microphone and make no network calls.
