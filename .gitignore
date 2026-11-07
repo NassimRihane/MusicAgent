@@ -16,3 +16,7 @@ venv311/
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Downloaded datasets and trained models (reproducible: see README)
+data/
+models/

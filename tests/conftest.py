@@ -16,6 +16,8 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import emotion_model as em   # noqa: E402 (needs the project on sys.path)
+
 SR = 22050
 
 
@@ -84,3 +86,32 @@ def steady_session():
     """Eight in-scale quarter notes at 60 BPM, exactly one second apart."""
     return make_session([event(float(i), [60 + [0, 2, 4, 5, 7, 9, 11, 12][i]])
                          for i in range(8)])
+
+
+# ─────────────────────────────────────────────
+# Emotion model data
+# ─────────────────────────────────────────────
+
+# Class-dependent synthetic features: arousal ↔ loudness/density, valence ↔ mode
+PROFILE = {"Q1": (80, 0.3, 4.0), "Q2": (85, -0.3, 4.5), "Q3": (50, -0.3, 1.5), "Q4": (50, 0.3, 1.5)}
+
+
+def synthetic_rows(songs_per_class=6, clips_per_song=4, seed=0):
+    rng = np.random.default_rng(seed)
+    rows = []
+    for q, (vel, mode, rate) in PROFILE.items():
+        for s in range(songs_per_class):
+            for c in range(clips_per_song):
+                f = {name: float(rng.normal(1, 0.1)) for name in em.FEATURES}
+                f.update(velocity_mean=rng.normal(vel, 4), major_minor=rng.normal(mode, 0.05),
+                         onset_rate=rng.normal(rate, 0.3))
+                rows.append({"clip": f"{q}_s{s}_{c}", "song": f"{q}s{s}", "quadrant": q, **f})
+    return rows
+
+
+@pytest.fixture(autouse=True)
+def single_core_forests(monkeypatch):
+    """Random Forests use one core in tests: worker processes made runs erratic."""
+    import chord_rf
+    monkeypatch.setattr(em, "N_JOBS", 1)
+    monkeypatch.setattr(chord_rf, "N_JOBS", 1)

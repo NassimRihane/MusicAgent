@@ -1,15 +1,22 @@
 # transcription.py
 #
-# Step 1 — Real-time transcription for piano
-# Pipeline: audio capture → onset/silence detection → basic-pitch → buffer → display
+# Step 1 — Recording and transcription
 #
-# Dependencies: sounddevice, numpy, librosa, basic-pitch, music21
-# Install:  pip install sounddevice numpy librosa basic-pitch music21
+# Records the piano from the microphone (or takes an existing audio file),
+# then transcribes the WHOLE recording with basic-pitch, detects the key with
+# music21 and the tempo with librosa (see recognition.py), and saves a
+# session JSON next to the session WAV.
+#
+# While recording, a live preview prints the notes as they are played
+# (basic-pitch on short segments). The preview is only for display; the
+# session is always built from the full recording, as basic-pitch is meant
+# to be used.
 #
 # Usage:
-#   python transcription.py --scale C --type major --bpm 60
+#   python transcription.py                                   # record; key and tempo detected
+#   python transcription.py --scale G --type minor --bpm 80   # declare the intended key / tempo
+#   python transcription.py --audio "Happy Birthday.mp3"      # analyse an existing recording
 #   python transcription.py --list-devices
-#   python transcription.py --device 2 --scale G --type minor --bpm 80
 
 import argparse
 import queue
@@ -21,19 +28,23 @@ import numpy as np
 import sounddevice as sd
 import librosa
 
+import recognition as rc
+
 
 # ─────────────────────────────────────────────
 # 0. COMMAND-LINE ARGUMENTS
 # ─────────────────────────────────────────────
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Real-time piano transcription")
-    parser.add_argument("--scale",        default="C",
-                        help="Root note of the scale (e.g. C, G, F#)")
+    parser = argparse.ArgumentParser(description="Piano recording and transcription")
+    parser.add_argument("--audio",        default=None,
+                        help="Analyse this audio file instead of recording")
+    parser.add_argument("--scale",        default=None,
+                        help="Intended key's tonic (e.g. C, G, F#). Default: detected by music21")
     parser.add_argument("--type",         default="major",
-                        choices=["major", "minor"], help="Scale type")
-    parser.add_argument("--bpm",          type=float, default=60.0,
-                        help="Tempo in BPM")
+                        choices=["major", "minor"], help="Intended key's mode (with --scale)")
+    parser.add_argument("--bpm",          type=float, default=None,
+                        help="Intended tempo. Default: estimated by librosa")
     parser.add_argument("--device",       type=int, default=None,
                         help="Index of the audio input device (see --list-devices)")
     parser.add_argument("--list-devices", action="store_true",
@@ -60,175 +71,82 @@ def list_devices():
 # 1. CONSTANTS & CONFIGURATION
 # ─────────────────────────────────────────────
 
-SAMPLE_RATE = 22050   # basic-pitch works natively at 22050 Hz
-HOP_SIZE    = 512     # audio callback block size (~23 ms per hop)
+SAMPLE_RATE  = rc.SAMPLE_RATE   # basic-pitch works natively at 22050 Hz
+HOP_SIZE     = 512              # audio callback block size (~23 ms per hop)
+SESSIONS_DIR = Path(__file__).parent / "sessions"
 
-# Onset / silence detection (RMS-based, calibrated at startup)
+# Live preview: onset / silence detection (RMS-based, calibrated at startup)
 RMS_ONSET_THRESHOLD   = 0.02   # overwritten after calibration
 RMS_SILENCE_THRESHOLD = 0.005  # overwritten after calibration
 ONSET_COOLDOWN_SEC    = 0.15   # minimum gap between two onsets
 
-# Segment collection
-# We collect audio until silence, then send the whole segment to basic-pitch.
+# Live preview segments: collected until silence, then sent to basic-pitch.
 # MIN_SEGMENT_SEC: segment must be at least this long before analysis.
 # MAX_SEGMENT_SEC: hard cap — send for analysis even if no silence detected.
-# SILENCE_HOLD_SEC: silence must persist for this long before we declare end-of-note.
-#   This avoids triggering on brief gaps within a legato phrase.
-MIN_SEGMENT_SEC  = 0.4    # raised from 0.2 — filters very short noise bursts
+# SILENCE_HOLD_SEC: silence must persist this long before a segment ends.
+MIN_SEGMENT_SEC  = 0.4
 MAX_SEGMENT_SEC  = 4.0
-SILENCE_HOLD_SEC = 0.15   # silence must last 150ms before triggering analysis
-
-# Rhythmic quantisation grid (in quarter-note beat units)
-# Dotted values = 1.5× base; triplets = 2/3 of next longer value.
-BEAT_GRID = {
-    "whole":           4.0,
-    "half":            2.0,
-    "quarter":         1.0,
-    "eighth":          0.5,
-    "16th":            0.25,
-    "dotted-half":     3.0,
-    "dotted-quarter":  1.5,
-    "dotted-eighth":   0.75,
-    "quarter-triplet": 2.0 / 3.0,
-    "eighth-triplet":  1.0 / 3.0,
-}
+SILENCE_HOLD_SEC = 0.15
 
 
 # ─────────────────────────────────────────────
-# 2. SCALES
+# 2. SESSION BUILDING (full-recording analysis)
 # ─────────────────────────────────────────────
 
-NOTE_NAMES_SHARP = ['C', 'C#', 'D', 'D#', 'E', 'F',
-                    'F#', 'G', 'G#', 'A', 'A#', 'B']
-
-NOTE_NAME_TO_PC = {
-    'C': 0, 'C#': 1, 'Db': 1, 'D': 2, 'D#': 3, 'Eb': 3,
-    'E': 4, 'F': 5, 'F#': 6, 'Gb': 6, 'G': 7,
-    'G#': 8, 'Ab': 8, 'A': 9, 'A#': 10, 'Bb': 10, 'B': 11,
-}
-
-SCALE_INTERVALS = {
-    "major": [0, 2, 4, 5, 7, 9, 11],
-    "minor": [0, 2, 3, 5, 7, 8, 10],   # natural minor
-}
-
-def build_scale(root_name: str, scale_type: str) -> set:
-    root_pc   = NOTE_NAME_TO_PC[root_name]
-    intervals = SCALE_INTERVALS[scale_type]
-    return set((root_pc + i) % 12 for i in intervals)
-
-
-# ─────────────────────────────────────────────
-# 3. NOTE / FREQUENCY CONVERTERS
-# ─────────────────────────────────────────────
-
-A4_FREQ = 440.0
-
-def freq_to_midi(f: float) -> float:
-    return 69 + 12 * np.log2(f / A4_FREQ)
-
-def midi_to_note_name(midi_int: int) -> str:
-    pc     = midi_int % 12
-    octave = midi_int // 12 - 1
-    return f"{NOTE_NAMES_SHARP[pc]}{octave}"
-
-def note_name_to_pc(name: str) -> int:
-    """Extract pitch class from a note name like 'C#4' or 'Bb3'."""
-    base = ''.join(c for c in name if not c.isdigit() and c != '-')
-    return NOTE_NAME_TO_PC.get(base, 0)
-
-
-# ─────────────────────────────────────────────
-# 4. RHYTHMIC QUANTISATION
-# ─────────────────────────────────────────────
-
-def quantize_duration(duration_sec: float, bpm: float) -> str:
+def build_session(wav_path: Path, declared_key: str = None, declared_bpm: float = None,
+                  source: str = None, onset_thresh: float = 0.5, frame_thresh: float = 0.3,
+                  min_note_dur: float = 0.05) -> Path:
     """
-    Convert a raw duration (seconds) to the nearest note value in BEAT_GRID.
-    Returns a key from BEAT_GRID, e.g. 'eighth', 'dotted-quarter', etc.
+    Transcribe a session WAV with basic-pitch, detect key (music21) and tempo
+    (librosa), and write session_X.json next to it. Declared key / tempo, when
+    given, are used for the session; detected ones are always recorded too.
     """
-    beat_duration  = 60.0 / bpm
-    duration_beats = duration_sec / beat_duration
+    wav_path = Path(wav_path)
+    print("  Transcribing the full recording with basic-pitch...")
+    notes = rc.transcribe(wav_path, onset_thresh, frame_thresh, min_note_dur)
+    audio, _ = librosa.load(str(wav_path), sr=SAMPLE_RATE, mono=True)
 
-    best_name = "quarter"
-    best_diff = float("inf")
-    for name, beats in BEAT_GRID.items():
-        diff = abs(duration_beats - beats)
-        if diff < best_diff:
-            best_diff = diff
-            best_name = name
-    return best_name
+    detected = rc.detect_key(notes)
+    beats = rc.track_beats(audio=audio)
+    key_name = declared_key or detected["key"]
+    bpm = declared_bpm or beats["tempo_bpm"]
+    scale_pc = rc.scale_pitch_classes(key_name) if key_name else None
+
+    session = {
+        "meta": {
+            "scale":           key_name,
+            "scale_source":    "declared" if declared_key else "detected (music21)",
+            "key_detected":    detected["key"],
+            "key_correlation": detected["correlation"],
+            "bpm":             bpm,
+            "bpm_source":      "declared" if declared_bpm else "estimated (librosa)",
+            "tempo_estimated": beats["tempo_bpm"],
+            "date":            datetime.now().isoformat(),
+            "audio":           wav_path.name,
+            "source":          source,
+            "transcription":   "basic-pitch (full recording)",
+        },
+        "events": rc.notes_to_events(notes, scale_pc, bpm),
+        "notes":  [{k: (round(v, 3) if isinstance(v, float) else v) for k, v in n.items()}
+                   for n in notes],
+    }
+    out = wav_path.with_suffix(".json")
+    out.write_text(json.dumps(session, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"  {len(notes)} notes  |  key {key_name} ({session['meta']['scale_source']})"
+          f"  |  {bpm:.0f} BPM ({session['meta']['bpm_source']})")
+    return out
+
+
+def import_audio(src, wav_path: Path) -> Path:
+    """Convert any audio file librosa can read to a mono 22050 Hz session WAV."""
+    import soundfile as sf
+    audio, _ = librosa.load(str(src), sr=SAMPLE_RATE, mono=True)
+    sf.write(str(wav_path), audio, SAMPLE_RATE)
+    return wav_path
 
 
 # ─────────────────────────────────────────────
-# 5. TRANSCRIPTION BUFFER
-# ─────────────────────────────────────────────
-
-class TranscriptionBuffer:
-    """
-    Stores musical events detected in real time.
-    Each event is a dict:
-        time        float   onset from session start (seconds), aligned with the session WAV
-        type        str     "note" or "chord"
-        notes       list    list of note dicts (see below) — chords have >1
-        duration    float   raw duration in seconds
-        rhythm      str     quantised note value
-        in_scale    bool    True if ALL notes are in the current scale
-
-    Each note dict inside 'notes':
-        midi        int     MIDI number
-        name        str     e.g. "C4"
-        pitch_class int     0–11
-        in_scale    bool
-        velocity    int     loudness 0–127 estimated by basic-pitch
-    """
-
-    def __init__(self, scale: str = "C major", bpm: float = 60.0):
-        self.events = []
-        self.scale  = scale
-        self.bpm    = bpm
-
-    def add(self, event: dict):
-        event["time"] = round(event["time"], 3)
-        self.events.append(event)
-
-    def to_json(self, path=None) -> dict:
-        data = {
-            "meta": {
-                "scale": self.scale,
-                "bpm":   self.bpm,
-                "date":  datetime.now().isoformat(),
-            },
-            "events": self.events,
-        }
-        if path:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-        return data
-
-    def display_last(self):
-        """Print the most recent event to the console."""
-        if not self.events:
-            return
-        e         = self.events[-1]
-        timestamp = f"[{e['time']:6.2f}s]"
-        rhythm    = e.get("rhythm", "?")
-        in_scale  = e.get("in_scale", False)
-        marker    = "✓" if in_scale else "✗"
-
-        note_list = e.get("notes", [])
-        names     = " + ".join(n["name"] for n in note_list)
-        ev_type   = "CHORD" if len(note_list) > 1 else "NOTE "
-
-        print(
-            f"{timestamp}  {ev_type}  {names:20s} | "
-            f"{rhythm:16s} | "
-            f"{'in scale' if in_scale else 'out of scale':13s} {marker}"
-        )
-
-
-# ─────────────────────────────────────────────
-# 6. NOISE FLOOR CALIBRATION
+# 3. LIVE PREVIEW
 # ─────────────────────────────────────────────
 
 def calibrate_noise_floor(device, duration_sec: float = 2.0):
@@ -243,20 +161,13 @@ def calibrate_noise_floor(device, duration_sec: float = 2.0):
     sd.wait()
     audio = recording.flatten()
 
-    rms_values = []
-    for i in range(0, len(audio) - HOP_SIZE, HOP_SIZE):
-        chunk = audio[i : i + HOP_SIZE]
-        rms_values.append(float(np.sqrt(np.mean(chunk ** 2))))
+    rms_values = [float(np.sqrt(np.mean(audio[i:i + HOP_SIZE] ** 2)))
+                  for i in range(0, len(audio) - HOP_SIZE, HOP_SIZE)]
+    noise_rms = float(np.percentile(rms_values, 95))
 
-    noise_rms         = float(np.percentile(rms_values, 95))
-
-    # Multipliers explanation:
-    #   ×10 for onset   — requires the signal to be 10× louder than background noise.
-    #                     This prevents the mic's self-noise from triggering analysis.
-    #   ×3  for silence — once a note is playing, RMS must drop to 3× noise floor
-    #                     before we consider it finished.
-    # If the room is very quiet (noise_rms < 0.001), we apply a hard floor
-    # so the thresholds remain meaningful.
+    # ×10 for onset: the signal must be 10× louder than the background noise.
+    # ×3 for silence: a note is over when RMS drops to 3× the noise floor.
+    # A hard floor keeps the thresholds meaningful in a very quiet room.
     noise_rms_floored = max(noise_rms, 0.001)
     onset_threshold   = noise_rms_floored * 10.0
     silence_threshold = noise_rms_floored * 3.0
@@ -266,134 +177,33 @@ def calibrate_noise_floor(device, duration_sec: float = 2.0):
     return onset_threshold, silence_threshold
 
 
-# ─────────────────────────────────────────────
-# 7. BASIC-PITCH ANALYSIS
-# ─────────────────────────────────────────────
-
-_BP_MODEL = None
-
-def _get_basic_pitch_model():
-    """Load the basic-pitch model once; reloading it per segment is slow."""
-    global _BP_MODEL
-    if _BP_MODEL is None:
-        from basic_pitch.inference import Model
-        from basic_pitch import ICASSP_2022_MODEL_PATH
-        _BP_MODEL = Model(ICASSP_2022_MODEL_PATH)
-    return _BP_MODEL
-
-
 def analyse_segment(audio_segment: np.ndarray, segment_start: float,
-                    scale_pc: set, bpm: float, onset_thresh: float = 0.5,
-                    frame_thresh: float = 0.3, min_note_dur: float = 0.05) -> list:
+                    scale_pc: set = None, bpm: float = 60.0) -> list:
     """
-    Run basic-pitch on an audio segment and return a list of events.
-
-    basic-pitch expects a file path, not a numpy array directly.
-    We write the segment to a temporary WAV file, run prediction, then delete it.
-
-    segment_start is the segment's position in the session (seconds), so that
-    each event gets its real onset time rather than the time analysis finished.
-
-    Returns a list of event dicts ready to be added to TranscriptionBuffer.
+    Live preview: basic-pitch on one segment (written to a temporary WAV),
+    returned as session events with times shifted by segment_start.
     """
     import tempfile, os, soundfile as sf
-    from basic_pitch.inference import predict
-
-    # Write segment to a temporary WAV file
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_path = tmp.name
     sf.write(tmp_path, audio_segment, SAMPLE_RATE)
-
     try:
-        _, midi_data, _ = predict(
-            tmp_path,
-            _get_basic_pitch_model(),
-            onset_threshold=onset_thresh,
-            frame_threshold=frame_thresh,
-            minimum_note_length=min_note_dur * 1000,   # ms
-            midi_tempo=bpm,
-        )
+        notes = rc.transcribe(tmp_path)
     finally:
         os.unlink(tmp_path)   # always clean up, even on error
-
-    if midi_data is None or len(midi_data.instruments) == 0:
-        return []
-
-    # Collect all notes from the first (and only) instrument track
-    raw_notes = []
-    for instrument in midi_data.instruments:
-        for note in instrument.notes:
-            raw_notes.append({
-                "start":      note.start,
-                "end":        note.end,
-                "midi":       note.pitch,
-                "velocity":   note.velocity,
-            })
-
-    if not raw_notes:
-        return []
-
-    # Sort by start time
-    raw_notes.sort(key=lambda n: n["start"])
-
-    # Group into events: notes starting within CHORD_WINDOW of each other
-    # are considered a chord.
-    CHORD_WINDOW = 0.08   # seconds — notes within 80 ms = simultaneous
-
-    events   = []
-    group    = [raw_notes[0]]
-
-    for note in raw_notes[1:]:
-        if note["start"] - group[0]["start"] <= CHORD_WINDOW:
-            group.append(note)
-        else:
-            events.append(_make_event(group, segment_start, scale_pc, bpm))
-            group = [note]
-    events.append(_make_event(group, segment_start, scale_pc, bpm))
-
-    return events
+    for n in notes:
+        n["start"] += segment_start
+        n["end"] += segment_start
+    return rc.notes_to_events(notes, scale_pc, bpm)
 
 
-def _make_event(note_group: list, segment_start: float, scale_pc: set, bpm: float) -> dict:
-    """Convert a group of simultaneous notes into a transcription event dict."""
-    # basic-pitch can report the same pitch twice in one group; keep the loudest
-    by_pitch = {}
-    for n in note_group:
-        if n["midi"] not in by_pitch or n["velocity"] > by_pitch[n["midi"]]["velocity"]:
-            by_pitch[n["midi"]] = n
-    note_group = sorted(by_pitch.values(), key=lambda n: n["midi"])
+def display_event(e: dict):
+    """Print one preview event."""
+    names = " + ".join(n["name"] for n in e["notes"])
+    kind = "CHORD" if len(e["notes"]) > 1 else "NOTE "
+    scale = "" if e["in_scale"] is None else ("in scale ✓" if e["in_scale"] else "out of scale ✗")
+    print(f"[{e['time']:6.2f}s]  {kind}  {names:20s} | {e['rhythm']:16s} | {scale}")
 
-    note_dicts = []
-    for n in note_group:
-        midi  = int(n["midi"])
-        name  = midi_to_note_name(midi)
-        pc    = midi % 12
-        note_dicts.append({
-            "midi":        midi,
-            "name":        name,
-            "pitch_class": pc,
-            "in_scale":    pc in scale_pc,
-            "velocity":    int(n["velocity"]),
-        })
-
-    duration_sec = float(np.mean([n["end"] - n["start"] for n in note_group]))
-    rhythm       = quantize_duration(duration_sec, bpm)
-    all_in_scale = all(n["in_scale"] for n in note_dicts)
-    ev_type      = "chord" if len(note_dicts) > 1 else "note"
-
-    return {
-        "type":     ev_type,
-        "notes":    note_dicts,
-        "duration": round(duration_sec, 3),
-        "rhythm":   rhythm,
-        "in_scale": all_in_scale,
-        "time":     segment_start + min(n["start"] for n in note_group),
-    }
-
-
-# ─────────────────────────────────────────────
-# 8. MAIN REAL-TIME LOOP
-# ─────────────────────────────────────────────
 
 audio_queue = queue.Queue()
 
@@ -404,150 +214,114 @@ def audio_callback(indata, frames, time_info, status):
     audio_queue.put(indata.copy())
 
 
-def main(argv=None):
+def record(wav_path: Path, device=None, scale_pc: set = None, bpm: float = None):
+    """
+    Record until Ctrl+C with a live note preview, then save the WAV.
+    Returns the WAV path, or None if nothing was recorded.
+    """
     global RMS_ONSET_THRESHOLD, RMS_SILENCE_THRESHOLD
-    args = parse_args(argv)
-
-    if args.list_devices:
-        list_devices()
-        return
-
-    scale_pc = build_scale(args.scale, args.type)
-
-    # Lazy-import basic-pitch here so startup errors are clear
-    try:
-        from basic_pitch.inference import predict   # noqa: F401
-        print("  basic-pitch loaded.")
-    except ImportError:
-        print("  ERROR: basic-pitch is not installed.")
-        print("  Run: pip install basic-pitch")
-        raise SystemExit(1)
-
-    buffer           = TranscriptionBuffer(f"{args.scale} {args.type}", args.bpm)
+    preview_bpm      = bpm or 60.0
     audio_accum      = []
     audio_accum_dur  = 0.0
     last_onset_time  = 0.0
     in_sound         = False
-    silence_dur      = 0.0  # tracks how long RMS has been below silence threshold
-    full_recording   = []   # accumulates ALL audio for WAV export
+    silence_dur      = 0.0  # how long RMS has been below the silence threshold
+    full_recording   = []   # accumulates ALL audio for the session WAV
     samples_seen     = 0    # audio clock: position in the session WAV
     segment_start    = 0.0  # session time (s) of the current segment's first block
-    sessions_dir = Path(__file__).parent / "sessions"
-    sessions_dir.mkdir(exist_ok=True)
-    timestamp    = datetime.now().strftime('%Y%m%d_%H%M%S')
-    session_file = sessions_dir / f"session_{timestamp}.json"
-    wav_file     = sessions_dir / f"session_{timestamp}.wav"
-    active_device_idx  = args.device if args.device is not None else sd.default.device[0]
-    active_device_name = sd.query_devices(active_device_idx)["name"]
 
-    print("=" * 60)
-    print("  Real-time Transcription — Piano")
-    print(f"  Scale    : {args.scale} {args.type}  |  BPM : {args.bpm}")
-    print(f"  Detector : basic-pitch (CNN polyphonic)")
-    print(f"  Mic      : [{active_device_idx}] {active_device_name}")
-    print(f"  Session  : {session_file}")
-    print("  Press Ctrl+C to stop and save.")
-    print("=" * 60)
-
-    # Dynamic noise-floor calibration
-    onset_thresh, silence_thresh = calibrate_noise_floor(args.device)
-    RMS_ONSET_THRESHOLD   = onset_thresh
-    RMS_SILENCE_THRESHOLD = silence_thresh
-    print("  Ready — you may start playing.")
+    RMS_ONSET_THRESHOLD, RMS_SILENCE_THRESHOLD = calibrate_noise_floor(device)
+    print("  Ready — you may start playing. Press Ctrl+C to stop.")
     print("-" * 60)
 
-    with sd.InputStream(
-        device=args.device,
-        channels=1,
-        callback=audio_callback,
-        samplerate=SAMPLE_RATE,
-        blocksize=HOP_SIZE,
-    ):
+    with sd.InputStream(device=device, channels=1, callback=audio_callback,
+                        samplerate=SAMPLE_RATE, blocksize=HOP_SIZE):
         try:
             while True:
-                data = audio_queue.get()
-                mono = np.squeeze(data).astype(np.float32)
-                # Use the audio clock, not wall time: analysis blocks this loop,
-                # so blocks are read late but their position in the stream is exact.
+                mono = np.squeeze(audio_queue.get()).astype(np.float32)
+                # Audio clock, not wall time: analysis blocks this loop, so blocks
+                # are read late but their position in the stream is exact.
                 block_start   = samples_seen / SAMPLE_RATE
                 samples_seen += len(mono)
-                now           = block_start
-
-                # Accumulate everything for the session WAV
                 full_recording.append(mono)
 
-                # ── RMS energy ────────────────────────────────────────────
-                rms = float(np.sqrt(np.mean(mono ** 2)))
-
-                # ── State transitions ─────────────────────────────────────
-                hop_dur = HOP_SIZE / SAMPLE_RATE   # ~23ms per hop
-
+                rms     = float(np.sqrt(np.mean(mono ** 2)))
+                hop_dur = HOP_SIZE / SAMPLE_RATE
                 onset_detected = (rms > RMS_ONSET_THRESHOLD
-                                  and (now - last_onset_time) > ONSET_COOLDOWN_SEC
+                                  and (block_start - last_onset_time) > ONSET_COOLDOWN_SEC
                                   and not in_sound)
-
-                # Silence must persist for SILENCE_HOLD_SEC before we react
                 if in_sound:
-                    if rms < RMS_SILENCE_THRESHOLD:
-                        silence_dur += hop_dur
-                    else:
-                        silence_dur = 0.0
-                silence_detected = (in_sound
-                                    and silence_dur >= SILENCE_HOLD_SEC
+                    silence_dur = silence_dur + hop_dur if rms < RMS_SILENCE_THRESHOLD else 0.0
+                silence_detected = (in_sound and silence_dur >= SILENCE_HOLD_SEC
                                     and audio_accum_dur >= MIN_SEGMENT_SEC)
 
                 if onset_detected:
-                    in_sound        = True
-                    silence_dur     = 0.0
-                    last_onset_time = now
-                    segment_start   = block_start
-                    audio_accum     = [mono]
-                    audio_accum_dur = hop_dur
-
+                    in_sound, silence_dur = True, 0.0
+                    last_onset_time = segment_start = block_start
+                    audio_accum, audio_accum_dur = [mono], hop_dur
                 elif in_sound:
                     audio_accum.append(mono)
                     audio_accum_dur += hop_dur
 
-                # ── Trigger analysis ──────────────────────────────────────
-                should_process = (
-                    silence_detected
-                    or (in_sound and audio_accum_dur >= MAX_SEGMENT_SEC)
-                )
-
-                if should_process and audio_accum:
-                    in_sound      = False
-                    audio_segment = np.concatenate(audio_accum)
-
-                    # Run basic-pitch on the full segment
-                    events = analyse_segment(audio_segment, segment_start,
-                                             scale_pc, args.bpm,
-                                             args.onset_thresh, args.frame_thresh,
-                                             args.min_note_dur)
-
-                    for event in events:
-                        buffer.add(event)
-                        buffer.display_last()
-
-                    audio_accum     = []
-                    audio_accum_dur = 0.0
+                if (silence_detected or (in_sound and audio_accum_dur >= MAX_SEGMENT_SEC)) \
+                        and audio_accum:
+                    in_sound = False
+                    for event in analyse_segment(np.concatenate(audio_accum), segment_start,
+                                                 scale_pc, preview_bpm):
+                        display_event(event)
+                    audio_accum, audio_accum_dur = [], 0.0
 
         except KeyboardInterrupt:
-            import soundfile as sf
+            pass
 
-            # Save JSON transcript
-            buffer.to_json(session_file)
+    if not full_recording:
+        return None
+    import soundfile as sf
+    sf.write(str(wav_path), np.concatenate(full_recording), SAMPLE_RATE)
+    print("\n" + "-" * 60)
+    print(f"  Recording saved: {wav_path}")
+    return wav_path
 
-            # Save full session WAV (for chord_analysis.py)
-            if full_recording:
-                wav_audio = np.concatenate(full_recording)
-                sf.write(str(wav_file), wav_audio, SAMPLE_RATE)
 
-            print("\n" + "=" * 60)
-            print(f"  Session ended — {len(buffer.events)} events recorded.")
-            print(f"  JSON  : {session_file}")
-            print(f"  WAV   : {wav_file}")
-            print(f"  → Run chord_analysis.py {session_file.name} for harmony analysis.")
-            print("=" * 60)
+# ─────────────────────────────────────────────
+# 4. MAIN
+# ─────────────────────────────────────────────
+
+def main(argv=None):
+    args = parse_args(argv)
+    if args.list_devices:
+        list_devices()
+        return
+
+    declared_key = f"{args.scale} {args.type}" if args.scale else None
+    SESSIONS_DIR.mkdir(exist_ok=True)
+    wav_path = SESSIONS_DIR / f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+
+    print("=" * 60)
+    print("  Piano transcription — basic-pitch")
+    print(f"  Key   : {declared_key or 'detected after recording (music21)'}")
+    print(f"  Tempo : {args.bpm or 'estimated after recording (librosa)'}")
+    if args.audio:
+        print(f"  Input : {args.audio}")
+        print("=" * 60)
+        import_audio(args.audio, wav_path)
+        source = Path(args.audio).name
+    else:
+        device = args.device if args.device is not None else sd.default.device[0]
+        print(f"  Mic   : [{device}] {sd.query_devices(device)['name']}")
+        print("=" * 60)
+        scale_pc = rc.scale_pitch_classes(declared_key) if declared_key else None
+        if record(wav_path, args.device, scale_pc, args.bpm) is None:
+            print("  Nothing was recorded.")
+            return
+        source = "microphone"
+
+    session = build_session(wav_path, declared_key, args.bpm, source,
+                            args.onset_thresh, args.frame_thresh, args.min_note_dur)
+    print("=" * 60)
+    print(f"  JSON : {session}")
+    print(f"  WAV  : {wav_path}")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

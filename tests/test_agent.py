@@ -54,10 +54,11 @@ def sent(monkeypatch):
 def test_system_prompt_contains_session_data():
     prompt = agent.build_system_prompt(FEEDBACK, "en")
     assert prompt.startswith(agent.SYSTEM_PROMPT_EN)
-    for expected in ["Scale  : C major", "GLOBAL SCORE : 81/100", "Good: few notes out of scale",
-                     "Frequent errors : C#", "Avg loudness    : 64.0", "Mostly steady",
-                     "[RHYTHM] Keep the flow."]:
+    for expected in ["Key    : C major", "Good: few notes out of scale",
+                     "Out-of-key notes: C#", "Avg loudness    : 64.0", "Mostly steady",
+                     "[RHYTHM] Keep the flow.", "--- CORRECTION CONTEXT ---"]:
         assert expected in prompt
+    assert "EXPRESSIVE ANALYSIS (main focus) ---" not in prompt
 
 
 def test_system_prompt_reads_legacy_misspelled_keys():
@@ -163,7 +164,7 @@ def test_dry_run_makes_no_call(tmp_path, capsys):
     path = write_json(tmp_path / "feedback_s.json", FEEDBACK)
     agent.main([str(path), "--dry-run"])        # conftest blocks requests.post
     out = capsys.readouterr().out
-    assert "--- SESSION DATA ---" in out and "--- OPENING MESSAGE ---" in out
+    assert "--- CORRECTION CONTEXT ---" in out and "--- OPENING MESSAGE ---" in out
 
 
 def test_conversation_keeps_errors_out_of_history(tmp_path, monkeypatch):
@@ -189,3 +190,63 @@ def test_opening_error_exits(tmp_path, monkeypatch):
     monkeypatch.setattr(requests, "post", lambda *a, **kw: FakeResponse(500, body={}))
     with pytest.raises(SystemExit):
         agent.main([str(path)])
+
+
+# ─────────────────────────────────────────────
+# Expressive analysis
+# ─────────────────────────────────────────────
+
+EXPRESSIVE = {
+    "emotion": "sad", "target": "Q3", "target_name": "sad",
+    "heard_as": "Q1", "heard_as_name": "happy / excited",
+    "probabilities": {"Q1": 0.39, "Q2": 0.12, "Q3": 0.21, "Q4": 0.28},
+    "advice": [{"cue": "velocity_mean", "name": "Loudness", "value": 69.4, "target": 54.6,
+                "gap": 1.04, "advice": "Play softer, with a lighter touch"}],
+    "already_there": [{"name": "Timing freedom"}],
+    "what_if": {"cues_changed": ["velocity_mean"],
+                "target_probability": {"before": 0.21, "after": 0.36}},
+    "fixed_by_piece": [{"name": "Mode (major / minor)"}, {"name": "Register"}],
+    "model": "EMOPIA 2.2 (1071 clips, 387 songs)",
+}
+
+
+def test_prompt_puts_expression_first():
+    prompt = agent.build_system_prompt(FEEDBACK, "en", EXPRESSIVE)
+    assert prompt.index("EXPRESSIVE ANALYSIS") < prompt.index("CORRECTION CONTEXT")
+    for expected in ["Learner's intention   : sad", "happy / excited (39%)",
+                     "1. Play softer, with a lighter touch (Loudness: currently clearly "
+                     "louder than typical sad performances)", "from 21% to 36%",
+                     "Already matching the intention: Timing freedom",
+                     "never ask to change): Mode (major / minor), Register"]:
+        assert expected in prompt
+
+
+def test_opening_states_the_intention():
+    assert "sound sad" in agent.generate_opening(FEEDBACK, "en", EXPRESSIVE)
+    assert "« sad »" in agent.generate_opening(FEEDBACK, "fr", EXPRESSIVE)
+
+
+def test_expressive_analysis_found_next_to_feedback(tmp_path):
+    feedback = write_json(tmp_path / "feedback_session_x.json", FEEDBACK)
+    assert agent.load_expressive(feedback) is None
+    write_json(tmp_path / "expressive_session_x.json", EXPRESSIVE)
+    assert agent.load_expressive(feedback)["emotion"] == "sad"
+
+
+def test_conversation_log_records_intention(tmp_path, monkeypatch):
+    path = write_json(tmp_path / "feedback_s.json", FEEDBACK)
+    write_json(tmp_path / "expressive_s.json", EXPRESSIVE)
+    monkeypatch.setattr(requests, "post", lambda *a, **kw: FakeResponse(content="ok"))
+    monkeypatch.setattr("builtins.input", lambda prompt="": "quit")
+    agent.main([str(path)])
+    log = json.loads((tmp_path / "conversation_feedback_s.json").read_text())
+    assert log["intention"] == "sad" and "sound sad" in log["history"][0]["content"]
+
+
+@pytest.mark.parametrize("cue,gap,expected", [
+    ("velocity_mean", 0.6, "slightly louder than typical sad performances"),
+    ("tempo_bpm", -1.5, "clearly slower than typical sad performances"),
+    ("articulation", -2.5, "much more detached than typical sad performances"),
+])
+def test_gaps_are_described_in_words(cue, gap, expected):
+    assert agent.describe_gap(cue, gap, "sad") == expected

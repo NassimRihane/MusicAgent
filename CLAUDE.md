@@ -5,16 +5,34 @@ Context for Claude Code sessions on this project. Read it first; update the
 
 ## Project goal
 
-A research prototype (Keio) for an AI assistant teacher for music learners
-(piano). The goal is to **guide the learner toward playing expressively**,
-not only to correct mistakes. Example: the learner wants to play a piece
-*happily*. The system should know what makes a performance sound happy
-(tempo, articulation, dynamics, mode…), find where the player falls short,
-and give personalised feedback through a chatbot.
+A research prototype (Keio) for an AI assistant teacher for piano learners.
+The goal is to **guide the learner toward playing expressively**, not only
+to correct mistakes: the learner states an intention (e.g. *sad*), the
+system estimates which emotion the performance conveys, and coaches the
+learner on the playing choices that would close the gap.
 
-Current state: the pipeline only measures note accuracy against a key,
-rhythmic regularity and chord fit. **No expressive analysis exists yet.**
-That is the main roadmap item (see below).
+## Architecture rule (from the user's supervisor, 2026-11-07)
+
+**Only the expressive feedback (layer 4) may be original. Everything else
+must use widely used, published tools or textbook methods ("only one degree
+of freedom").** The supervisor was confused by a custom-looking ML model, so:
+
+- **Never add custom models or hand-rolled music analysis to layers 1–3.**
+  Use basic-pitch, music21, librosa, pretty_midi, scikit-learn. Write only
+  glue (format conversion, grouping) around them.
+- Machine learning outside layer 4 uses well-known models (Random Forest)
+  trained on public or synthetic data, evaluated honestly.
+- Design choices belong in `expressive_feedback.py`, listed in its header,
+  so they can be defended and changed.
+
+| Layer | Files | Tools |
+|---|---|---|
+| 1. Recognition | `recognition.py` (all calls), `transcription.py`, `chord_analysis.py` | basic-pitch, music21 (key: Krumhansl–Schmuckler; chords; Roman numerals), librosa (beats, tempo), pretty_midi |
+| 2. Description | `expression_analysis.py` | standard descriptors via layer 1 + librosa |
+| 3. Models | `emotion_model.py`, `chord_rf.py` | scikit-learn RandomForestClassifier |
+| 4. **Research** | `expressive_feedback.py` | the project's own logic |
+| Coaching | `agent.py` | Ollama (default) / Azure |
+| Support | `feedback.py` (corrections), `main.py`, `json_to_score.py`, `piano_roll.py` | |
 
 ## Ground rules
 
@@ -22,100 +40,256 @@ That is the main roadmap item (see below).
   default provider is local **Ollama** (`mistral` installed), which is free
   and fine to call for tests. `--dry-run` prints the prompt and makes no call.
 - **The GitHub repo is public** (`NassimRihane/MusicAgent`). Never commit
-  `sessions/` (the user's recordings; it's gitignored), credentials or `.env`
-  files. Commit or push only when the user asks; never force-push.
-- **Don't overwrite files in `sessions/`.** They are the user's real
-  recordings. Run tests on copies in a scratch directory (`feedback.py` and
-  `chord_analysis.py` write their outputs next to their input).
+  `sessions/` (the user's recordings), `data/` (EMOPIA), `models/` (trained
+  models), credentials or `.env` files; all are gitignored. Commit or push
+  only when the user asks; never force-push.
+- **Don't overwrite the user's recordings in `sessions/`.** Run tests on
+  copies or in `tmp_path` (most scripts write their outputs next to their
+  input).
 - Match the existing style: section banners (`# ───── N. TITLE ─────`),
   aligned assignments, a module header comment with usage. Each script has
   `parse_args(argv=None)` in section 0 and `main(argv=None)`; **never read
   CLI args at import time**, and pass values to functions as parameters.
 - **Run the tests after any code change:** `.venv311/bin/python -m pytest`
-  (~8 s), or `-m "not slow"` to skip real basic-pitch and the pipeline
-  subprocess. Add or update tests along with code changes.
+  (~20 s), or `-m "not slow"`. Add or update tests along with code changes.
 - The user writes in English and sometimes French; the agent supports
-  `--lang en|fr`.
+  `--lang en|fr`. The README is public-facing (supervisor, outsiders):
+  keep it understandable without this file.
 
 ## Environment
 
 - Run everything with **`.venv311/bin/python`** (Python 3.11 from Homebrew,
-  `/opt/homebrew/bin/python3.11`). Rebuilt on 2026-10-20 from
-  `requirements.txt`; verified that basic-pitch loads and transcribes.
+  `/opt/homebrew/bin/python3.11`).
 - **Python 3.11 is required.** On macOS, basic-pitch 0.4.0 uses CoreML only
   on 3.11; on 3.12+ it requires `tensorflow-macos<2.15.1`, which doesn't exist.
 - `requirements.txt` pins `setuptools<81` (resampy imports `pkg_resources`)
-  and `chardet<6` (otherwise requests warns).
-- Ollama runs locally at `http://localhost:11434` (version 0.34.2); installed
-  model: `mistral`.
+  and `chardet<6` (otherwise requests warns). coremltools warns that
+  scikit-learn 1.9.1 is "not supported": harmless (only its conversion API).
+- **Trained models (gitignored, reproducible):**
+  - `python emotion_model.py --train` → downloads EMOPIA 2.2 to
+    `data/EMOPIA_2.2/` (Zenodo record 5257995, 32 MB, CC-BY 4.0), caches
+    features in `data/emopia_features.csv` (~3 min the first time), saves
+    `models/emotion_rf.joblib` and `models/emotion_rf_report.json`.
+  - `python chord_rf.py --train` → `models/chord_rf.joblib` (~25 s;
+    also trained automatically on first use).
+- Ollama runs locally at `http://localhost:11434`; installed model: `mistral`.
 - Git: `main` tracks `origin` = https://github.com/NassimRihane/MusicAgent
   (public). `core.fileMode=false`, because every file on disk is mode 755.
-  No `gh` CLI is installed.
+  No `gh` CLI. macOS has no `timeout` command: use
+  `perl -e 'alarm N; exec @ARGV' cmd`.
 
 ## Tests
 
 `tests/`, one file per module; config in `pytest.ini`; `pytest` is in
-`requirements-dev.txt`.
+`requirements-dev.txt`. 150 tests, ~20 s.
 
 - `conftest.py` blocks `requests.post` in every test (no Ollama or Azure
-  calls; agent tests install fakes that record the payload). It also
-  provides synthetic audio helpers (`tones`, `silence`) and session builders
-  (`event`, `make_session`, `write_json`). Tests write only to `tmp_path`.
+  calls; agent tests install fakes). It provides synthetic audio (`tones`,
+  `silence`), session builders (`event`, `make_session`, `write_json`) and
+  synthetic emotion-feature rows (`synthetic_rows`, `PROFILE`). Tests write
+  only to `tmp_path` and never need `data/` or `models/`: models are trained
+  on small synthetic data inside the tests (`test_emotion_model.py` even
+  writes a miniature EMOPIA with real MIDI files).
+- An autouse fixture sets `emotion_model.N_JOBS = chord_rf.N_JOBS = 1`:
+  Random Forests with `n_jobs=-1` spawned worker processes that made test
+  runs erratically slow (one run hung > 5 min). Emotion tests also use
+  `N_TREES = 50`.
 - `slow` marker: real basic-pitch on synthesised notes, and the full
   `main.py --session … --dry-run` pipeline as subprocesses.
-- One **strict xfail** documents the rhythm-metric limitation (see Known
-  issues). When the metric is redesigned, it will XPASS and fail the run:
-  remove the xfail marker then.
-- Mutation-checked on 2026-10-20: reintroducing old bugs (`self.h`, the
-  `assessement` key, wall-clock timestamps, no skipping of simultaneous
-  onsets) makes tests fail.
+- Mutation-checked on 2026-11-07: reintroducing bugs (event time from the
+  lowest note, minor keys without raised 6th/7th, no chord-window extension,
+  flipped advice direction, inert what-if, cross-validation not grouped by
+  song) makes tests fail.
 
 ## Pipeline
 
-`main.py` runs every step in order (or `--session X.json` to skip
-recording); each step is still runnable on its own:
+`main.py` runs every step in order; each step also runs on its own:
 
 ```
-transcription.py   mic → session_X.json (note events) + session_X.wav
-        │
-        ├─ json_to_score.py   session_X.json → .musicxml / .pdf (LilyPond) / .mid
-        ├─ chord_analysis.py  session_X.wav  → session_X_chords.json/.txt
-        │                     (uses chord_model.py if trained weights exist)
+transcription.py        mic (live preview) or --audio FILE → session_X.wav
+                        → basic-pitch on the FULL recording, key (music21),
+                          tempo (librosa) → session_X.json
+        ├─ chord_analysis.py   → session_X_chords.json/.txt
+        │                        --backend music21 (default, from notes) | rf | both
+        ├─ json_to_score.py    → .musicxml / .pdf / .mid (optional, --score)
         ▼
-feedback.py        session_X.json (+ _chords.json, auto-detected)
-                   → feedback_session_X.json/.txt  (notes / rhythm / harmony + suggestions)
+feedback.py             correction feedback (notes in key, tempo stability,
+                        harmony) → feedback_session_X.json/.txt
+expressive_feedback.py  --emotion E → expressive_session_X.json
         ▼
-agent.py           feedback_*.json → chat loop (Ollama or Azure) → conversation_feedback_*.json
+agent.py                feedback_*.json (+ expressive_*.json, auto-found)
+                        → chat → conversation_feedback_session_X.json
 ```
 
-Model selection: the `PROVIDER` / `MODEL` constants at the top of `agent.py`,
-or `--provider ollama|azure` and `--model <name>` (also on `main.py`). Both
-providers use the OpenAI chat format (Ollama via `/v1/chat/completions`).
+`main.py` options: `--audio FILE` / `--session JSON` / (record),
+`--emotion`, `--scale/--type/--bpm` (declared key/tempo; default detected),
+`--chords music21|rf`, `--no-chords`, `--score`, `--lang`, `--provider`,
+`--model`, `--dry-run`. The expressive step is skipped with a message if
+`models/emotion_rf.joblib` is missing.
 
-Legacy prototypes in `prototypes/`, not part of the pipeline: `note_detection.py` (aubio,
-real-time pitch, C major hard-coded), `chord_detection.py` (live chord
-templates, C major only), `sim_proba.py` (a Bayesian simulation of learner
-motivation that could later feed a learner model).
+Other tools: `expression_analysis.py A --compare B --same-piece` (happy→sad
+cue directions from Juslin & Laukka 2003, with `MIN_CHANGE` thresholds);
+`emotion_model.py --predict FILE`; `piano_roll.py` (matplotlib piano rolls of
+audio / session / expression JSON).
+
+Model selection for the chat: the `PROVIDER` / `MODEL` constants at the top
+of `agent.py`, or `--provider` / `--model`. Both providers use the OpenAI
+chat format (Ollama via `/v1/chat/completions`).
+
+Legacy prototypes in `prototypes/` (not part of the pipeline):
+`note_detection.py`, `chord_detection.py`, `sim_proba.py` (a Bayesian
+simulation of learner motivation that could later feed a learner model).
+
+### Key definitions
+
+- **Note** (everywhere): `{"start": s, "end": s, "midi": int, "velocity": 0–127}`.
+- **Key/scale**: `recognition.scale_pitch_classes` uses music21; minor keys
+  include the harmonic and melodic minor (raised 6th/7th), so G# in A minor
+  is in key.
+- **Chords**: `recognition.chords_from_notes` names the notes sounding in
+  each beat with music21 (weights = overlap × velocity; ≤ 4 pitch classes
+  with ≥ 20 % of the max weight). A window with < 3 pitch classes is
+  extended up to 3 beats. Canonical labels (`"C"`, `"A:min"`, `"G:dom7"`)
+  are shared with `chord_rf.VOCAB`.
+- **Tempo stability** (`tempo_cv` in `track_beats`): CV of librosa's local
+  tempo, ignoring the first/last 4 s and folding octave errors to the
+  median (MIREX practice). Steady 0; 20 ms jitter ~0.02; ritardando
+  120→67 BPM ~0.11. `feedback.py`: < 0.03 steady, < 0.08 mostly steady,
+  0.15 scores 0.
+- **Emotion features** (`expression_analysis.NOTE_FEATURES`, identical on
+  EMOPIA MIDI and on our transcriptions): tempo_bpm, onset_rate,
+  timing_variability, articulation, velocity_mean, velocity_std,
+  mean_pitch, pitch_range (p5–p95), polyphony, major_minor. EMOPIA notes
+  are read with the sustain pedal applied (`load_midi_notes(sustain=True)`).
+- **Quadrants**: Q1 happy/excited, Q2 tense/angry, Q3 sad, Q4 calm/relaxed;
+  `emotion_model.EMOTION_TO_QUADRANT` maps learner words.
 
 ### Session JSON schema (transcription.py output)
 
 ```json
-{"meta": {"scale": "C major", "bpm": 60.0, "date": "..."},
- "events": [{"type": "note|chord", "time": 12.12, "duration": 0.5,
+{"meta": {"scale": "C major", "scale_source": "declared | detected (music21)",
+          "key_detected": "C major", "key_correlation": 0.79,
+          "bpm": 112.3, "bpm_source": "declared | estimated (librosa)",
+          "tempo_estimated": 112.3, "date": "...", "audio": "session_X.wav",
+          "source": "microphone | <file name>", "transcription": "basic-pitch (full recording)"},
+ "events": [{"type": "note|chord", "time": 0.5, "duration": 0.4,
              "rhythm": "eighth", "in_scale": true,
              "notes": [{"midi": 60, "name": "C4", "pitch_class": 0,
-                        "in_scale": true, "velocity": 90}]}]}
+                        "in_scale": true, "velocity": 90}]}],
+ "notes": [{"start": 0.5, "end": 0.9, "midi": 60, "velocity": 90}]}
 ```
 
-- `time` is the onset in seconds from stream start, **aligned with the
-  session WAV** (since the 2026-10-10 change).
-- Rhythm labels: `whole, half, quarter, eighth, 16th, dotted-half,
-  dotted-quarter, dotted-eighth, quarter-triplet, eighth-triplet`.
-- Old sessions (before 2026-10-10) store `confidence` (= velocity/127)
-  instead of `velocity`, and have **broken `time` values** (see Known
-  issues). Readers must accept both formats.
+- `notes` is the source of truth; `events` (grouped attacks) is kept for
+  `json_to_score.py` and older readers. `recognition.session_notes()` reads
+  either (sessions before 2026-11-07 have no `notes`; before 2026-10-10 they
+  store `confidence` = velocity/127 and have broken `time` values).
 
 ## Change log
+
+### 2026-11-07: Restructure into standard layers + Random Forests (supervisor's request)
+
+The supervisor asked that everything except the expressive feedback rely on
+widely used tools, and suggested well-known models such as Random Forest.
+Decisions taken with the user: Random Forest for **both** emotion and chord
+recognition; chords named by **music21 from the notes** by default (the RF
+is the audio alternative); correction feedback **kept, on standard tools**.
+
+- **recognition.py (new, layer 1):** all calls to basic-pitch (model loaded
+  once, debug prints silenced), pretty_midi (with sustain pedal), music21
+  (key, scale, chord symbols, Roman numerals) and librosa (beats, tempo
+  stability). Replaces the hand-written scale tables, Krumhansl–Schmuckler
+  code and BEAT_GRID duplicated across files.
+- **chord_model.py deleted** (custom numpy BiLSTM, never trained; in git
+  history at 49f90ea). **chord_rf.py (new):** Random Forest (300 trees) on
+  beat-synchronous CQT chroma, trained on 3,400 synthetic piano chords
+  (85 classes): 94.6 % held-out on synthetic data, 59–70 % agreement with
+  music21 on the scale degree on the Happy Birthday clips (confuses major
+  and minor).
+- **chord_analysis.py rewritten:** input is a session JSON; backends
+  `music21` (default), `rf`, `both` (reports agreement). The librosa
+  template backend is gone.
+- **emotion_model.py (new):** Random Forest (500 trees, balanced classes) on
+  EMOPIA. GroupKFold by song: **67.9 %** 4-quadrant accuracy (chance
+  28.9 %), arousal 88.7 %, valence 75.4 %. Permutation importance:
+  velocity_mean 0.24, major_minor 0.15, all others < 0.03; tempo_bpm and
+  articulation ≈ 0. On the Happy Birthday clips: happy → Q1 (39 %),
+  sad → Q3 (52 %).
+- **expressive_feedback.py (new, layer 4):** see its header. Gap = (value −
+  target median) / target IQR on actionable cues (tempo, loudness, dynamic
+  contrast, articulation, timing freedom); priority = |gap| × permutation
+  importance; top 3 with |gap| ≥ 0.5 become advice; what-if re-prediction.
+  Piece-fixed cues (mode, register, range, polyphony, density) are reported,
+  never advised.
+- **expression_analysis.py:** now layer 2 only; `note_features()` shared
+  with the emotion model; key via music21 (the hand-rolled KS is gone).
+- **transcription.py rewritten:** the session is built by basic-pitch on the
+  full recording (`build_session`); the segment-by-segment transcription is
+  now only a live preview. `--audio FILE` analyses an existing recording.
+  `--scale` and `--bpm` are optional (default: detected / estimated).
+  Sessions now store `notes`. TranscriptionBuffer removed.
+- **feedback.py rewritten:** notes in key via music21 (with minor
+  variants); rhythm = librosa tempo + tempo stability + hesitations (the
+  beat-grid deviation was tried and **dropped**: arpeggios and dotted
+  rhythms made the real happy clip score worse than random notes);
+  harmony from Roman numerals with major and minor progression patterns.
+  The metronome advice now says "if this wasn't intentional rubato".
+- **agent.py:** new expression-first prompts (EN/FR): intention first,
+  numbers turned into musical language, never ask to remove what the
+  expressive analysis asks for (e.g. rubato), never change piece-fixed
+  cues. `expressive_<session>.json` is found automatically (`--expressive`
+  to override); the opening states the intention; the log stores it.
+  The LLM gets gaps in words, not raw values (`describe_gap`: slightly /
+  clearly / much + louder, slower, more detached…): with raw numbers,
+  mistral recited "your loudness is 66.2, typical 54.56" to the learner.
+- **main.py:** 5 steps; `--audio`, `--emotion`, `--chords`; no default key
+  or tempo.
+- **piano_roll.py:** uses recognition.py (session `notes`, music21 key).
+- Fixed during testing: `notes_to_events` took a chord's time from its
+  lowest note instead of its earliest onset.
+- Tests rewritten: 150 tests (new `test_recognition.py`,
+  `test_emotion_model.py`, `test_expressive_feedback.py`); the old xfail
+  is gone with the old rhythm metric.
+- requirements: `scikit-learn==1.9.1`, `pretty_midi==0.2.11.post0`.
+  `.gitignore`: `data/`, `models/`.
+- Example sessions made from the demo clips (gitignored):
+  `sessions/session_20261107_164559*` (Happy Birthday, analysed with
+  `--emotion sad`) and `sessions/session_20261107_164234*` (Unhappy
+  Birthday, `--emotion happy`).
+
+### 2026-10-21 (b): piano_roll.py
+
+- New matplotlib script (see Pipeline) so the "What the system heard" view
+  can be regenerated for any extract without a new artifact.
+  `tests/test_piano_roll.py` (suite: 101 passed + 1 xfail).
+  `matplotlib==3.11.2` pinned in requirements (it was already installed
+  via music21).
+- Demo image: `sessions/demo_happy_birthday/piano_roll.png`.
+- Old sessions (before 2026-10-10) visibly show the timestamp bug in the
+  roll: notes are stacked in columns every ~4 s.
+
+### 2026-10-21: Expressive cue analysis + supervisor demo
+
+- **expression_analysis.py (new):** first version of roadmap step 2 (see
+  Pipeline). Design choices made after checking real data:
+  - Mode comes from a duration × velocity pitch-class histogram of the
+    *transcribed notes*. Audio chroma called the sad clip "A major" (0.83
+    vs 0.80 for A minor), because overtones of A and E hid the third.
+  - For two takes of the same piece, tempo = time from first to last
+    onset. Beat tracking reported only −4 % against a real +31 %.
+  - Changes smaller than `MIN_CHANGE` count as "no clear change", so that
+    tiny differences are not reported as matches.
+- Tests: `tests/test_expression_analysis.py` (suite now 91 passed + 1 xfail).
+- **Demo for the user's supervisor** (2026-10-22 meeting): two YouTube clips
+  (*When You Turn HAPPY SONGS into SUPER SAD*), stored outside the repo at
+  `~/Documents/Audacity4/{Happy,Unhappy} Birthday.mp3`. Results in
+  `sessions/demo_happy_birthday/` (gitignored): `expression.json`, and
+  `coach_answer.json` (unedited prototype answer from local mistral).
+  Result: 5/8 cues agree; register and brightness show no clear change;
+  dynamic contrast is the opposite. Published as a private artifact,
+  "Happy vs Unhappy Birthday":
+  https://claude.ai/artifact/9V5YkJWkBLDUJUSXTYWvzQ (the page's source
+  was a scratchpad file; the data is in the JSON above). The audio is
+  third-party, so it is not embedded in the page or committed.
 
 ### 2026-10-20 (b): Automated tests, argparse refactor
 
@@ -239,42 +413,43 @@ inference (tested with stubs). Azure calls were never tested (by design).
 
 ## Known issues / limitations
 
-- Sessions recorded before 2026-10-10 have corrupted `time` values (one
-  timestamp per segment, delayed). Their rhythm feedback is unreliable. This
-  can't be repaired from the JSON; re-transcribe from the `.wav`
-  (roadmap 1).
-- Note accuracy only means "in the key". Chromatic notes are counted as
-  errors, and there is no reference score or alignment.
-- The rhythm metric (deviation from the nearest grid value) is crude: with
-  10 grid values, the deviation almost never exceeds ~0.25. So "rhythm too
-  irregular" and the metronome suggestion (deviation > 0.4) practically
-  never trigger. Documented by the xfail
-  `test_rhythm_very_irregular_is_flagged`. The BPM is the one the user set,
-  not the tempo they played.
+- **No score, so no rhythm correctness.** Tempo stability can't tell
+  intentional rubato from an unsteady pulse. `tempo_cv` is also noisy on
+  short sequences with random jitter (same jitter, CV 0.01–0.10 across
+  seeds); it reliably measures real tempo changes. Score-informed rhythm
+  (alignment to a reference with DTW) is on the roadmap.
+- **EMOPIA domain gap:** pop piano, transcribed by a different system
+  (GiantMIDI / Kong et al.) than basic-pitch, with pedal-extended notes.
+  Typical articulation for Q3 in EMOPIA is ~3.6 vs ~1.3 in basic-pitch
+  transcriptions, so articulation advice has the right direction but an
+  exaggerated size. Velocity calibration may differ too, and velocity
+  dominates the model (it may partly reflect recording loudness).
+- tempo_bpm and articulation have ~0 importance in the emotion model, so
+  they rarely rank high in the advice even when the gap is large.
+- Chord names from music21 include melody notes ("C/GaddD", sometimes odd
+  spellings); Roman numerals are what the feedback uses and they are right
+  on the demo clips. The audio RF confuses major and minor.
+- Note accuracy only means "in the key"; chromatic notes count as errors.
 - json_to_score.py inserts no rests, so the score ignores timing gaps.
-- Progression detection uses chord roots only, so repeated roots break the
-  patterns.
-- Real-time segmentation drops audio before the RMS onset and blocks the
-  loop during inference.
+- Live preview segmentation drops audio before the RMS onset and blocks the
+  loop during inference (the saved session is unaffected: it uses the full
+  recording).
+- **The recording path (microphone) is untested** since the 2026-11-07
+  rewrite of transcription.py; `--audio` is tested end to end.
 
 ## Roadmap
 
-0. **Foundations:** ~~venv, git, prototypes folder, main.py, Ollama, tests,
-   argparse refactor~~ (all done 2026-10-20). Possible next step: CI
-   (GitHub Actions running `pytest -m "not slow"`).
-1. **Reliable measurement:** run basic-pitch offline on the full WAV after
-   each session; real tempo from beat tracking; validate on MAESTRO.
-2. **Expressive features, per phrase:** tempo curve and rubato, dynamics
-   (level, range, contour), articulation (duration / inter-onset interval),
-   attack, register, brightness (spectral centroid).
-3. **Emotion → cue profiles** (Juslin & Laukka; Gabrielsson & Lindström).
-   *Happy*: fast, major, staccato, fairly loud, bright, low timing
-   variability. *Sad*: slow, legato, soft, dark, more rubato. The learner
-   states an intention; the system finds the phrases with the largest gaps
-   from that profile. Later, train a classifier on EMOPIA.
-4. **A real agent:** tools (phrase features, compare to the target, suggest
-   an exercise); prompt focused on expressive coaching rather than error
-   correction; Socratic questions; a replay-and-compare loop; a learner
-   model and memory across sessions.
-5. **Evaluation:** do the measured cues agree with listeners' perception?
-   Compare with expert teachers; run a user study.
+0. **Foundations:** done (venv, git, tests, main.py, Ollama, standard
+   layers). Possible: CI (GitHub Actions running `pytest -m "not slow"`).
+1. **Score-informed analysis:** align the performance to a reference
+   (MusicXML/MIDI) with DTW (librosa.sequence.dtw) for real note and rhythm
+   correctness, and phrase boundaries.
+2. **Phrase-level expressive feedback:** run layer 4 per phrase/window to
+   say *where* the expression falls short.
+3. **Reduce the EMOPIA domain gap:** normalise velocities per performance,
+   or transcribe EMOPIA audio with basic-pitch; validate on a few recorded
+   happy/sad takes by the user.
+4. **Agent:** tools (re-analyse a phrase, compare two takes), a
+   replay-and-compare loop, a learner model and memory across sessions.
+5. **Evaluation:** do the model's judgements match listeners'? Compare the
+   advice with expert teachers; user study.

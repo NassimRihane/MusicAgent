@@ -1,48 +1,39 @@
 import json
 
+import numpy as np
 import pytest
 
 import feedback as fb
-from conftest import event, make_session, write_json
+import recognition as rc
+from conftest import write_json
 
-C_MAJOR = fb.build_scale("C", "major")
-
-
-# ─────────────────────────────────────────────
-# Music theory helpers
-# ─────────────────────────────────────────────
-
-def test_build_scale():
-    assert C_MAJOR == {0, 2, 4, 5, 7, 9, 11}
-    assert 6 in fb.build_scale("G", "major")          # F#
-    assert fb.build_scale("A", "minor") == C_MAJOR    # relative minor
+C_MAJOR = rc.scale_pitch_classes("C major")
 
 
-def test_note_pc_strips_octave_and_sign():
-    assert fb.note_pc("C#4") == 1
-    assert fb.note_pc("B-1") == 11
+def n(start, end, midi, velocity=80):
+    return {"start": start, "end": end, "midi": midi, "velocity": velocity}
+
+
+def steady_notes(period=0.5, count=32, jitter=0.0, seed=0):
+    rng = np.random.default_rng(seed)
+    times = np.arange(count) * period + rng.normal(0, jitter, count)
+    return [n(float(t), float(t) + 0.3, [60, 64, 67, 72][i % 4]) for i, t in enumerate(times)]
 
 
 # ─────────────────────────────────────────────
 # Level 1 — notes
 # ─────────────────────────────────────────────
 
-def test_notes_in_and_out_of_scale():
-    events = [event(0, [60]), event(1, [61]), event(2, [61]), event(3, [64])]
-    res = fb.analyse_notes(events, C_MAJOR)
-    assert res["total_notes"] == 4
-    assert res["in_scale_count"] == 2
-    assert res["score"] == 50
+def test_notes_in_and_out_of_key():
+    res = fb.analyse_notes([n(0, 1, 60), n(1, 2, 61), n(2, 3, 61), n(3, 4, 64)], C_MAJOR)
+    assert (res["total_notes"], res["in_scale_count"], res["score"]) == (4, 2, 50)
     assert res["frequent_errors"][0] == {"note": "C#", "count": 2}
-    assert res["assessment"].startswith("Work again")
-    assert res["avg_velocity"] == 80
+    assert res["assessment"].startswith("Many notes") and res["avg_velocity"] == 80
 
 
-def test_notes_legacy_confidence_is_read_as_velocity():
-    ev = event(0, [60])
-    del ev["notes"][0]["velocity"]
-    ev["notes"][0]["confidence"] = 0.5
-    assert fb.analyse_notes([ev], C_MAJOR)["avg_velocity"] == 63.5
+def test_raised_seventh_is_in_a_minor():
+    res = fb.analyse_notes([n(0, 1, 68), n(1, 2, 69)], rc.scale_pitch_classes("A minor"))  # G#, A
+    assert res["score"] == 100
 
 
 def test_notes_no_data():
@@ -53,81 +44,76 @@ def test_notes_no_data():
 # Level 2 — rhythm
 # ─────────────────────────────────────────────
 
-def test_rhythm_steady(steady_session):
-    res = fb.analyse_rhythm(steady_session["events"], 60)
-    assert res["timing_score"] == 100
-    assert res["timing_assessment"] == "Steady rhythm"
-    assert res["hesitation_count"] == 0
+def rhythm(notes, target=None):
+    return fb.analyse_rhythm(notes, rc.track_beats(notes=notes), target)
 
 
-def test_rhythm_irregular_scores_lower_than_steady(steady_session):
-    times = [0, 0.85, 2.05, 2.9, 4.1, 4.95, 6.15, 7.0]
-    irregular = [event(t, [60]) for t in times]
-    steady = fb.analyse_rhythm(steady_session["events"], 60)["timing_score"]
-    assert fb.analyse_rhythm(irregular, 60)["timing_score"] < steady
+def test_rhythm_steady():
+    res = rhythm(steady_notes())
+    assert res["timing_assessment"] == "Steady tempo" and res["timing_score"] >= 90
+    assert res["tempo_bpm"] == pytest.approx(120, rel=0.05)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Known limitation: deviation is measured against the nearest of 10 grid "
-    "values, so it rarely exceeds 0.25 and very irregular playing is not flagged"))
-def test_rhythm_very_irregular_is_flagged():
-    times = [0, 1.25, 1.95, 3.2, 3.9, 5.15, 5.85, 7.1]
-    res = fb.analyse_rhythm([event(t, [60]) for t in times], 60)
-    assert res["timing_assessment"] == "rhythm too irregular"
+def tempo_curve(slowest_period, count=40):
+    """Ritardando from 120 BPM down to 60/slowest_period, then accelerando back."""
+    periods = np.concatenate([np.linspace(0.5, slowest_period, count // 2),
+                              np.linspace(slowest_period, 0.5, count // 2)])
+    times = np.concatenate([[0], np.cumsum(periods)[:-1]])
+    return [n(float(t), float(t) + 0.3, 60) for t in times]
 
 
-def test_rhythm_skips_simultaneous_onsets(steady_session):
-    events = steady_session["events"]
-    doubled = sorted(events + [dict(e, time=e["time"] + 0.01) for e in events],
-                     key=lambda e: e["time"])
-    assert fb.analyse_rhythm(doubled, 60)["timing_score"] == 100
+def test_rhythm_tempo_changes_score_lower():
+    # Short random jitter is measured unreliably (see CLAUDE.md); real tempo changes are not
+    scores = [rhythm(tempo_curve(p))["timing_score"] for p in (0.5, 0.6, 0.9)]
+    assert scores[0] > scores[1] > scores[2]
+    assert "varies" in rhythm(tempo_curve(0.9))["timing_assessment"]
 
 
-def test_rhythm_hesitation_detected_and_excluded_from_deviation():
-    times = [0, 1, 2, 3, 8, 9, 10]          # 5 s gap at 60 BPM
-    res = fb.analyse_rhythm([event(t, [60]) for t in times], 60)
-    assert res["hesitation_count"] == 1
-    assert res["hesitations"][0]["gap_beats"] == 5.0
-    assert res["timing_score"] == 100
+def test_rhythm_tempo_against_target():
+    res = rhythm(steady_notes(), target=100)
+    assert res["tempo_vs_target"] == pytest.approx(0.2, abs=0.03)
 
 
-def test_rhythm_not_enough_intervals():
-    res = fb.analyse_rhythm([event(0, [60]), event(1, [62])], 60)
-    assert "timing_score" not in res
-    assert "Not enough" in res["timing_assessment"]
+def test_rhythm_hesitation():
+    notes = steady_notes(count=16) + [n(t, t + 0.3, 60) for t in np.arange(12.0, 16.0, 0.5)]
+    res = rhythm(notes)
+    assert res["hesitation_count"] == 1 and res["hesitations"][0]["gap_sec"] == pytest.approx(4.5)
+
+
+def test_rhythm_not_enough_notes():
+    res = rhythm([n(0, 0.3, 60), n(0.5, 0.8, 62)])
+    assert "timing_score" not in res and "Not enough" in res["timing_assessment"]
 
 
 def test_rhythm_no_data():
-    assert fb.analyse_rhythm([], 60)["status"] == "no_data"
+    assert fb.analyse_rhythm([], {"tempo_bpm": 0, "beat_times": [], "tempo_cv": 0})["status"] == "no_data"
 
 
 # ─────────────────────────────────────────────
 # Level 3 — harmony
 # ─────────────────────────────────────────────
 
-def chords(*pairs):
-    return [{"chord": c, "fit": f} for c, f in pairs]
+def chord(name, numeral, fit="in_scale"):
+    return {"chord": name, "numeral": numeral, "fit": fit}
 
 
-def test_harmony_ignores_silence_segments():
-    res = fb.analyse_harmony(
-        chords(("N", "no_chord"), ("C", "in_scale"), ("F", "in_scale"),
-               ("G", "in_scale"), ("F#:sus4", "out_of_scale"), ("N", "no_chord")),
-        C_MAJOR, "C", "major")
-    assert res["total_chord_segments"] == 4
-    assert res["harmony_score"] == 75
-    assert res["non_diatonic_chords"] == [{"chord": "F#:sus4", "count": 1}]
+def test_harmony_ignores_silence_and_finds_progressions():
+    chords = [chord("N", None, "no_chord"), chord("C", "I"), chord("C/E", "I"), chord("F", "IV"),
+              chord("G7", "V"), chord("F#", "#IV", "out_of_scale")]
+    res = fb.analyse_harmony(chords)
+    assert res["total_chord_segments"] == 5 and res["harmony_score"] == 80
+    assert res["progression"] == "I IV V #IV"
+    assert res["progressions_detected"][0]["progression"] == "I-IV-V"
+    assert res["non_diatonic_chords"] == [{"chord": "F#", "count": 1}]
 
 
-def test_harmony_only_silence_is_no_data():
-    res = fb.analyse_harmony(chords(("N", "no_chord")), C_MAJOR, "C", "major")
-    assert res["status"] == "no_data"
+def test_harmony_minor_progression():
+    res = fb.analyse_harmony([chord("Am", "i"), chord("Dm", "iv"), chord("E", "V")])
+    assert res["progressions_detected"][0]["progression"] == "i-iv-V"
 
 
-def test_detect_progressions():
-    found = fb._detect_progressions(["C", "F", "G", "C", "G", "A:min", "F"], "C", "major")
-    names = {f["progression"] for f in found}
-    assert {"I-IV-V", "I-V-vi-IV"} <= names
+def test_harmony_no_chords():
+    assert fb.analyse_harmony([chord("N", None, "no_chord")])["status"] == "no_data"
 
 
 # ─────────────────────────────────────────────
@@ -135,28 +121,26 @@ def test_detect_progressions():
 # ─────────────────────────────────────────────
 
 def test_suggestions_empty_session():
-    sugg = fb.build_suggestions({"status": "no_data"}, {"status": "no_data"},
-                                {"status": "no_data"}, 60)
+    sugg = fb.build_suggestions({"status": "no_data"}, {}, {})
     assert len(sugg) == 1 and "No notes" in sugg[0]["message"]
 
 
 def test_suggestions_low_note_accuracy():
     notes = {"score": 40, "frequent_errors": [{"note": "C#", "count": 3}]}
-    sugg = fb.build_suggestions(notes, {"timing_score": 100}, {}, 60)
-    assert sugg[0]["priority"] == 1 and sugg[0]["area"] == "notes"
-    assert "C#. Review" in sugg[0]["message"]
+    sugg = fb.build_suggestions(notes, {"timing_score": 100}, {})
+    assert sugg[0]["priority"] == 1 and "C#." in sugg[0]["message"]
 
 
-def test_suggestions_metronome_uses_session_bpm():
-    sugg = fb.build_suggestions({"score": 95}, {"avg_ioi_deviation": 0.5,
-                                                "timing_score": 50}, {}, 100)
-    assert any("70 BPM" in s["message"] for s in sugg)
+def test_suggestions_metronome_mentions_rubato_and_target_tempo():
+    sugg = fb.build_suggestions({"score": 95}, {"timing_score": 20, "target_bpm": 100,
+                                                "tempo_bpm": 90}, {})
+    msg = next(s["message"] for s in sugg if s["area"] == "rhythm")
+    assert "rubato" in msg and "70 BPM" in msg
 
 
 def test_suggestions_encouragement_needs_a_timing_score():
-    no_timing = fb.build_suggestions({"score": 95}, {}, {}, 60)
-    assert not any(s["area"] == "encouragement" for s in no_timing)
-    good = fb.build_suggestions({"score": 95}, {"timing_score": 90}, {}, 60)
+    assert not any(s["area"] == "encouragement" for s in fb.build_suggestions({"score": 95}, {}, {}))
+    good = fb.build_suggestions({"score": 95}, {"timing_score": 90}, {})
     assert any(s["area"] == "encouragement" for s in good)
 
 
@@ -164,16 +148,21 @@ def test_suggestions_encouragement_needs_a_timing_score():
 # End to end
 # ─────────────────────────────────────────────
 
-def test_main_writes_reports_and_auto_detects_chords(tmp_path, steady_session):
-    session = write_json(tmp_path / "session_test.json", steady_session)
-    write_json(tmp_path / "session_test_chords.json",
-               {"chords": chords(("C", "in_scale"), ("G", "in_scale"))})
-
+def test_main_writes_reports_and_auto_detects_chords(tmp_path):
+    notes = steady_notes()
+    session = write_json(tmp_path / "session_t.json",
+                         {"meta": {"scale": "C major", "scale_source": "declared"}, "notes": notes})
+    write_json(tmp_path / "session_t_chords.json",
+               {"chords": [chord("C", "I"), chord("G", "V"), chord("C", "I")]})
     fb.main([str(session)])
-
-    out = json.loads((tmp_path / "feedback_session_test.json").read_text())
-    assert out["note_accuracy"]["assessment"].startswith("Excellent")
-    assert out["rhythm"]["timing_assessment"] == "Steady rhythm"
+    out = json.loads((tmp_path / "feedback_session_t.json").read_text())
+    assert out["note_accuracy"]["score"] == 100
+    assert out["rhythm"]["timing_assessment"] == "Steady tempo"
     assert out["harmony"]["harmony_score"] == 100
-    txt = (tmp_path / "feedback_session_test.txt").read_text()
-    assert "Assessment : Excellent" in txt
+    assert "Assessment  : Excellent" in (tmp_path / "feedback_session_t.txt").read_text()
+
+
+def test_main_detects_key_for_sessions_without_one(tmp_path):
+    session = write_json(tmp_path / "session_t.json", {"meta": {}, "notes": steady_notes()})
+    fb.main([str(session)])
+    assert json.loads((tmp_path / "feedback_session_t.json").read_text())["meta"]["scale"] == "C major"

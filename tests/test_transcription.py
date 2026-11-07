@@ -1,110 +1,82 @@
 import json
-from types import SimpleNamespace as NS
 
 import numpy as np
 import pytest
+import soundfile as sf
 
+import recognition as rc
 import transcription as tr
 from conftest import SR, silence, tones
 
-C_MAJOR = tr.build_scale("C", "major")
+# A C major arpeggio at 120 BPM
+NOTES = [{"start": 0.5 * i, "end": 0.5 * i + 0.4, "midi": m, "velocity": 80}
+         for i, m in enumerate([60, 64, 67, 72] * 4)]
 
 
-def raw(start, end, midi, velocity=80):
-    return {"start": start, "end": end, "midi": midi, "velocity": velocity}
-
-
-# ─────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────
-
-@pytest.mark.parametrize("seconds,bpm,expected", [
-    (1.0, 60, "quarter"), (0.5, 60, "eighth"), (2.0, 60, "half"),
-    (1.5, 60, "dotted-quarter"), (0.5, 120, "quarter"), (0.33, 60, "eighth-triplet"),
-])
-def test_quantize_duration(seconds, bpm, expected):
-    assert tr.quantize_duration(seconds, bpm) == expected
-
-
-def test_note_names():
-    assert tr.midi_to_note_name(60) == "C4"
-    assert tr.midi_to_note_name(69) == "A4"
-    assert tr.note_name_to_pc("Bb3") == 10
-
-
-def test_buffer_rounds_time_and_writes_meta(tmp_path):
-    buf = tr.TranscriptionBuffer("G minor", 80)
-    buf.add({"time": 1.23456, "notes": []})
-    data = buf.to_json(tmp_path / "s.json")
-    assert data["events"][0]["time"] == 1.235
-    saved = json.loads((tmp_path / "s.json").read_text())
-    assert saved["meta"]["scale"] == "G minor" and saved["meta"]["bpm"] == 80
-
-
-# ─────────────────────────────────────────────
-# Event building
-# ─────────────────────────────────────────────
-
-def test_make_event_time_is_segment_start_plus_onset():
-    ev = tr._make_event([raw(0.30, 1.30, 60)], 12.0, C_MAJOR, 60)
-    assert ev["time"] == pytest.approx(12.30)
-    assert ev["type"] == "note" and ev["rhythm"] == "quarter"
-
-
-def test_make_event_merges_duplicate_pitches_keeping_loudest():
-    group = [raw(0.10, 0.6, 64, 70), raw(0.12, 0.6, 60, 50), raw(0.13, 0.6, 60, 90)]
-    ev = tr._make_event(group, 0.0, C_MAJOR, 60)
-    assert [(n["name"], n["velocity"]) for n in ev["notes"]] == [("C4", 90), ("E4", 70)]
-    assert ev["type"] == "chord"
-
-
-def test_make_event_scale_flags():
-    ev = tr._make_event([raw(0, 0.5, 60), raw(0, 0.5, 61)], 0.0, C_MAJOR, 60)
-    assert [n["in_scale"] for n in ev["notes"]] == [True, False]
-    assert ev["in_scale"] is False
-
-
-def test_analyse_segment_groups_notes_with_fake_model(monkeypatch):
-    import basic_pitch.inference as bpi
-    notes = [NS(start=0.10, end=0.60, pitch=60, velocity=80),
-             NS(start=0.15, end=0.60, pitch=64, velocity=70),   # within 80 ms → chord
-             NS(start=1.10, end=1.50, pitch=67, velocity=60)]
+@pytest.fixture
+def fake_basic_pitch(monkeypatch):
     calls = []
 
-    def fake_predict(path, model, **kw):
-        calls.append(kw)
-        return None, NS(instruments=[NS(notes=notes)]), None
-    monkeypatch.setattr(bpi, "predict", fake_predict)
-    monkeypatch.setattr(tr, "_get_basic_pitch_model", lambda: "model")
-
-    events = tr.analyse_segment(np.zeros(SR, dtype=np.float32), 20.0, C_MAJOR, 90,
-                                onset_thresh=0.4)
-    assert [round(e["time"], 2) for e in events] == [20.10, 21.10]
-    assert [len(e["notes"]) for e in events] == [2, 1]
-    assert calls[0]["onset_threshold"] == 0.4 and calls[0]["midi_tempo"] == 90
+    def fake(path, *args, **kw):
+        calls.append(str(path))
+        return [dict(n) for n in NOTES]
+    monkeypatch.setattr(rc, "transcribe", fake)
+    return calls
 
 
-def test_basic_pitch_model_loaded_once(monkeypatch):
-    import basic_pitch.inference as bpi
-    loads = []
-    monkeypatch.setattr(bpi, "Model", lambda path: loads.append(path) or object())
-    monkeypatch.setattr(tr, "_BP_MODEL", None)
-    first = tr._get_basic_pitch_model()
-    assert tr._get_basic_pitch_model() is first
-    assert len(loads) == 1
+@pytest.fixture
+def wav(tmp_path):
+    path = tmp_path / "session_test.wav"
+    audio = np.concatenate([np.concatenate([tones([n["midi"]], 0.4), silence(0.1)]) for n in NOTES])
+    sf.write(path, audio, SR)
+    return path
 
 
-# ─────────────────────────────────────────────
-# Real model
-# ─────────────────────────────────────────────
+def test_build_session_detects_key_and_tempo(wav, fake_basic_pitch):
+    out = tr.build_session(wav, source="test")
+    session = json.loads(out.read_text())
+    meta = session["meta"]
+    assert out == wav.with_suffix(".json") and fake_basic_pitch == [str(wav)]
+    assert meta["scale"] == meta["key_detected"] == "C major"
+    assert meta["scale_source"].startswith("detected") and meta["bpm_source"].startswith("estimated")
+    assert meta["bpm"] == pytest.approx(120, rel=0.05)
+    assert len(session["notes"]) == 16 and len(session["events"]) == 16
+    assert all(e["in_scale"] for e in session["events"])
 
-@pytest.mark.slow
-def test_real_basic_pitch_transcribes_synthesised_notes(monkeypatch):
-    monkeypatch.setattr(tr, "_BP_MODEL", None)
-    audio = np.concatenate([silence(0.5), tones([60], 1.0, amp=0.3),
-                            silence(0.5), tones([67], 1.0, amp=0.3)])
-    events = tr.analyse_segment(audio, 10.0, C_MAJOR, 60)
-    pitches = {n["midi"] for e in events for n in e["notes"]}
-    assert {60, 67} <= pitches
-    c4 = min(e["time"] for e in events if any(n["midi"] == 60 for n in e["notes"]))
-    assert c4 == pytest.approx(10.5, abs=0.1)
+
+def test_build_session_uses_declared_key_and_tempo(wav, fake_basic_pitch):
+    meta = json.loads(tr.build_session(wav, "G major", 90).read_text())["meta"]
+    assert (meta["scale"], meta["bpm"]) == ("G major", 90)
+    assert meta["scale_source"] == meta["bpm_source"] == "declared"
+    assert meta["key_detected"] == "C major"
+
+
+def test_import_audio_converts_to_mono_22050(tmp_path):
+    src = tmp_path / "stereo.wav"
+    sf.write(src, np.stack([tones([60], 1.0, sr=44100)] * 2, axis=1), 44100)
+    out = tr.import_audio(src, tmp_path / "session_x.wav")
+    audio, sr = sf.read(out)
+    assert sr == SR and audio.ndim == 1 and len(audio) == pytest.approx(SR, abs=10)
+
+
+def test_live_preview_segment_times(monkeypatch):
+    monkeypatch.setattr(rc, "transcribe", lambda path: [
+        {"start": 0.1, "end": 0.6, "midi": 60, "velocity": 80},
+        {"start": 1.1, "end": 1.5, "midi": 61, "velocity": 60}])
+    events = tr.analyse_segment(np.zeros(SR, dtype=np.float32), 20.0,
+                                rc.scale_pitch_classes("C major"), 60)
+    assert [e["time"] for e in events] == [20.1, 21.1]
+    assert [e["in_scale"] for e in events] == [True, False]
+
+
+def test_display_event(capsys):
+    tr.display_event(rc.notes_to_events(NOTES[:1])[0])
+    assert "C4" in capsys.readouterr().out
+
+
+def test_main_with_audio_file(tmp_path, wav, fake_basic_pitch, monkeypatch):
+    monkeypatch.setattr(tr, "SESSIONS_DIR", tmp_path / "sessions")
+    tr.main(["--audio", str(wav)])
+    [session] = (tmp_path / "sessions").glob("session_*.json")
+    meta = json.loads(session.read_text())["meta"]
+    assert meta["source"] == wav.name and session.with_suffix(".wav").exists()

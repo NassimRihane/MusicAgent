@@ -11,6 +11,10 @@
 #                      export AZURE_OPENAI_KEY="your-key-here"
 #                      export AZURE_OPENAI_DEPLOYMENT="model-exemple"
 #
+# The coach's main input is the expressive analysis (expressive_feedback.py),
+# found automatically next to the feedback file; the correction feedback
+# (feedback.py) is passed as context.
+#
 # Usage:
 #   python agent.py sessions/feedback_session_20260101_120000.json
 #   python agent.py sessions/feedback_session_20260101_120000.json --lang fr
@@ -52,6 +56,8 @@ def parse_args(argv=None):
         help="Conversation language (en or fr, default: en)")
     parser.add_argument("--max-tokens", type=int, default=800,
         help="Maximum tokens per response (default: 800)")
+    parser.add_argument("--expressive", default=None,
+        help="Expressive analysis JSON (default: expressive_<session>.json next to the feedback)")
     parser.add_argument("--dry-run", action="store_true",
         help="Print the system prompt and opening message without calling the API")
     parser.add_argument("--provider", default=PROVIDER, choices=["ollama", "azure"],
@@ -137,47 +143,55 @@ def load_azure_config() -> dict:
 # 2. SYSTEM PROMPT BUILDER
 # ─────────────────────────────────────────────
  
-SYSTEM_PROMPT_EN = """You are a warm, encouraging music teacher assistant helping a learner practise piano.
- 
-You have access to a structured analysis of their latest practice session.
-Your role is to:
-1. Explain clearly what went well and what needs improvement
-2. Give concrete, actionable advice adapted to the learner's level
-3. Motivate them to continue practising
-4. Answer their questions about music theory when relevant
-5. Suggest specific exercises when the data points to a recurring issue
- 
-Guidelines:
-- Be encouraging before being critical
-- Keep explanations concise — one idea per message
-- Use musical terminology but explain it when the learner might not know it
-- If the learner seems discouraged, prioritise motivation over technical detail
-- Reference specific numbers from the session (e.g. "you played 87% of notes in scale")
-- Suggest a concrete next step at the end of each response
- 
-The session analysis data is embedded below.
+SYSTEM_PROMPT_EN = """You are a warm, encouraging piano teacher who helps learners play \
+expressively: not only the right notes, but with the emotion they intend.
+
+You receive two analyses of the learner's latest performance:
+- an EXPRESSIVE ANALYSIS (the main focus): the emotion a listener model hears,
+  the learner's intention, and the playing changes that would bring the
+  performance closer to that intention, most important first;
+- a CORRECTION CONTEXT: wrong notes, rhythm and harmony.
+
+How to coach:
+- Start from the intention: say what already conveys it, then give the one or
+  two most important changes from the expressive analysis.
+- Turn measurements into musical language a learner can act on (touch, weight,
+  pedal, breathing, phrasing). Use at most one number per idea.
+- The intention comes first. Something the correction context calls an error
+  (for example irregular timing) can be a deliberate expressive choice, such as
+  rubato in a sad piece: never ask the learner to remove what the expressive
+  analysis asks for.
+- Mention a correction only if it really gets in the way of the expression.
+- Never suggest changing what is set by the piece (its key, register or texture).
+- Keep it short: one idea per message, and end with one concrete thing to try.
+
+The analysis data is embedded below.
 """
  
-SYSTEM_PROMPT_FR = """Tu es un assistant professeur de musique, chaleureux et encourageant, \
-qui aide un apprenant à progresser au piano.
- 
-Tu disposes d'une analyse structurée de leur dernière session de pratique.
-Ton rôle est de :
-1. Expliquer clairement ce qui s'est bien passé et ce qui nécessite du travail
-2. Donner des conseils concrets et actionnables adaptés au niveau de l'apprenant
-3. Motiver l'apprenant à continuer
-4. Répondre à ses questions de théorie musicale si besoin
-5. Suggérer des exercices spécifiques quand les données révèlent un problème récurrent
- 
-Directives :
-- Encourager avant de critiquer
-- Une idée par message, explications concises
-- Utiliser le vocabulaire musical mais l'expliquer si l'apprenant ne le connaît pas
-- Si l'apprenant semble découragé, privilégier la motivation au détail technique
-- Référencer les données chiffrées de la session (ex : "87 % de tes notes étaient dans la gamme")
-- Proposer une prochaine étape concrète à la fin de chaque réponse
- 
-Les données d'analyse de la session sont intégrées ci-dessous.
+SYSTEM_PROMPT_FR = """Tu es un professeur de piano chaleureux et encourageant, qui aide les \
+apprenants à jouer de manière expressive : pas seulement les bonnes notes, mais avec \
+l'émotion qu'ils veulent transmettre.
+
+Tu reçois deux analyses de la dernière interprétation de l'apprenant :
+- une ANALYSE EXPRESSIVE (le sujet principal) : l'émotion qu'un modèle d'écoute
+  perçoit, l'intention de l'apprenant, et les changements de jeu qui
+  rapprocheraient l'interprétation de cette intention, du plus important au moins important ;
+- un CONTEXTE DE CORRECTION : fausses notes, rythme et harmonie.
+
+Comment accompagner :
+- Pars de l'intention : dis ce qui la transmet déjà, puis donne les un ou deux
+  changements les plus importants de l'analyse expressive.
+- Traduis les mesures en langage musical concret (toucher, poids, pédale,
+  respiration, phrasé). Au plus un chiffre par idée.
+- L'intention passe en premier. Ce que le contexte de correction appelle une
+  erreur (par exemple un rythme irrégulier) peut être un choix expressif, comme
+  le rubato dans un morceau triste : ne demande jamais de supprimer ce que
+  l'analyse expressive demande.
+- Ne mentionne une correction que si elle gêne vraiment l'expression.
+- Ne propose jamais de changer ce qui est fixé par le morceau (tonalité, registre, texture).
+- Reste bref : une idée par message, et termine par une chose concrète à essayer.
+
+Les données d'analyse sont intégrées ci-dessous.
 """
 
 
@@ -189,57 +203,97 @@ def _first(d: dict, *keys, default="no data"):
     return default
 
 
-def build_system_prompt(feedback: dict, lang: str) -> str:
-    """Build the system prompt with session analysis embedded."""
+# How a gap reads in words: (word when the learner is above the target, below it)
+GAP_WORDS = {
+    "tempo_bpm":          ("faster", "slower"),
+    "velocity_mean":      ("louder", "softer"),
+    "velocity_std":       ("more contrasted in dynamics", "more even in dynamics"),
+    "articulation":       ("more connected (legato)", "more detached"),
+    "timing_variability": ("freer in timing", "steadier in timing"),
+}
+
+
+def describe_gap(cue: str, gap: float, target_name: str) -> str:
+    """'clearly louder than typical sad performances' (gap in inter-quartile ranges)."""
+    size = "slightly" if abs(gap) < 1 else "clearly" if abs(gap) < 2 else "much"
+    above, below = GAP_WORDS.get(cue, ("higher", "lower"))
+    return f"{size} {above if gap > 0 else below} than typical {target_name} performances"
+
+
+def expressive_block(x: dict) -> str:
+    """Text block for the expressive analysis (output of expressive_feedback.py)."""
+    p = x["probabilities"]
+    target = x["target"]
+    lines = [
+        "--- EXPRESSIVE ANALYSIS (main focus) ---",
+        f"Learner's intention   : {x.get('emotion', x['target_name'])} ({target}, {x['target_name']})",
+        f"What the model hears  : {x['heard_as']} {x['heard_as_name']} ({p[x['heard_as']]:.0%}); "
+        f"the intention is at {p[target]:.0%}",
+        f"Listener model        : Random Forest trained on {x['model']}",
+        "Priority changes (most important first):",
+    ]
+    for i, c in enumerate(x["advice"], 1):
+        lines.append(f"  {i}. {c['advice']} ({c['name']}: currently "
+                     f"{describe_gap(c['cue'], c['gap'], x['target_name'])})")
+    if not x["advice"]:
+        lines.append("  none: the controllable cues already match the intention")
+    w = x["what_if"]["target_probability"]
+    if x["advice"]:
+        lines.append(f"With these changes the model's probability for the intention would go "
+                     f"from {w['before']:.0%} to {w['after']:.0%}.")
+    if x["already_there"]:
+        lines.append("Already matching the intention: "
+                     + ", ".join(c["name"] for c in x["already_there"]))
+    lines.append("Set by the piece (never ask to change): "
+                 + ", ".join(c["name"] for c in x["fixed_by_piece"]))
+    lines.append("--- END EXPRESSIVE ANALYSIS ---")
+    return "\n".join(lines)
+
+
+def build_system_prompt(feedback: dict, lang: str, expressive: dict = None) -> str:
+    """Build the system prompt with the session analyses embedded."""
     base    = SYSTEM_PROMPT_FR if lang == "fr" else SYSTEM_PROMPT_EN
     meta    = feedback.get("meta", {})
     notes   = feedback.get("note_accuracy", {})
     rhythm  = feedback.get("rhythm", {})
     harmony = feedback.get("harmony", {})
     sugg    = feedback.get("suggestions", [])
- 
-    scores = [s for s in [notes.get("score"), rhythm.get("timing_score"),
-                           harmony.get("harmony_score")] if s is not None]
-    global_score = round(sum(scores) / len(scores)) if scores else 0
- 
+
     errors_str = ", ".join(e["note"] for e in notes.get("frequent_errors", [])[:3]) or "none"
     nd_str     = ", ".join(c["chord"] for c in harmony.get("non_diatonic_chords", [])[:3]) or "none"
     progs_str  = ", ".join(p["progression"] for p in harmony.get("progressions_detected", [])[:3]) or "none detected"
-    vals_str   = ", ".join(v["value"] for v in rhythm.get("dominant_values", [])[:3])
     sugg_lines = "\n".join(f"  [{s['area'].upper()}] {s['message']}" for s in sugg[:3])
- 
-    data_block = f"""
---- SESSION DATA ---
-Scale  : {meta.get("scale", "?")}
-BPM    : {meta.get("bpm", "?")}
+
+    correction = f"""
+--- CORRECTION CONTEXT ---
+Key    : {meta.get("scale", "?")} ({meta.get("scale_source", "declared")})
+Tempo  : {rhythm.get("tempo_bpm", meta.get("bpm", "?"))} BPM
 Date   : {meta.get("date", "?")}
- 
-GLOBAL SCORE : {global_score}/100
- 
-NOTE ACCURACY ({notes.get("score", "N/A")}/100):
+
+NOTES ({notes.get("score", "N/A")}/100):
   Total notes     : {notes.get("total_notes", 0)}
-  In scale        : {notes.get("in_scale_count", 0)} ({round(notes.get("in_scale_ratio", 0)*100)}%)
+  In key          : {notes.get("in_scale_count", 0)} ({round(notes.get("in_scale_ratio", 0)*100)}%)
   Assessment      : {_first(notes, "assessment", "assessement", "status")}
-  Frequent errors : {errors_str}
+  Out-of-key notes: {errors_str}
   Avg loudness    : {notes.get("avg_velocity", "?")} (MIDI velocity, 0-127)
- 
+
 RHYTHM ({rhythm.get("timing_score", "N/A")}/100):
   Assessment      : {_first(rhythm, "timing_assessment", "timing_assessement", "status")}
   Hesitations     : {rhythm.get("hesitation_count", 0)}
-  Main note values: {vals_str}
-  Avg IOI deviation: {rhythm.get("avg_ioi_deviation", "?")}
- 
+
 HARMONY ({harmony.get("harmony_score", "N/A")}/100):
   Assessment      : {harmony.get("harmony_assessment", harmony.get("status", "no data"))}
-  Non-diatonic    : {nd_str}
-  Progressions    : {progs_str}
- 
-PRIORITY SUGGESTIONS:
-{sugg_lines}
---- END SESSION DATA ---
-"""
-    return base + data_block
+  Progression     : {harmony.get("progression", "?")}
+  Out-of-key      : {nd_str}
+  Known patterns  : {progs_str}
 
+CORRECTION SUGGESTIONS:
+{sugg_lines}
+--- END CORRECTION CONTEXT ---
+"""
+    if expressive:
+        return base + "\n" + expressive_block(expressive) + "\n" + correction
+    return base + correction
 
 
 
@@ -309,12 +363,18 @@ def call_model(config: dict, system_prompt: str,
 # 4. CONTEXT-AWARE OPENING MESSAGE
 # ─────────────────────────────────────────────
  
-def generate_opening(feedback: dict, lang: str) -> str:
+def generate_opening(feedback: dict, lang: str, expressive: dict = None) -> str:
     """
-    Choose a first message appropriate to the session score.
-    A good score → request for a summary.
-    A low score  → ask what to prioritise.
+    First message of the learner. With an expressive analysis: state the
+    intention. Otherwise, choose by score: a good score asks for a summary,
+    a low one asks what to prioritise.
     """
+    if expressive:
+        emotion = expressive.get("emotion", expressive["target_name"])
+        if lang == "fr":
+            return (f"Je voulais que ce morceau sonne « {emotion} ». "
+                    "Comment est-ce que ça sonne, et que dois-je changer ?")
+        return f"I wanted this piece to sound {emotion}. How did it sound, and what should I change?"
     scores = [s for s in [
         feedback.get("note_accuracy", {}).get("score"),
         feedback.get("rhythm", {}).get("timing_score"),
@@ -347,6 +407,15 @@ def generate_opening(feedback: dict, lang: str) -> str:
 # 5. MAIN CONVERSATION LOOP
 # ─────────────────────────────────────────────
  
+def load_expressive(feedback_path: Path, explicit: str = None):
+    """The expressive analysis for this session, if there is one."""
+    path = Path(explicit) if explicit else feedback_path.with_name(
+        feedback_path.name.replace("feedback_", "expressive_", 1))
+    if path.exists() and path != feedback_path:
+        return json.loads(path.read_text(encoding="utf-8"))
+    return None
+
+
 def main(argv=None):
     args = parse_args(argv)
     feedback_path = Path(args.feedback)
@@ -356,12 +425,13 @@ def main(argv=None):
  
     feedback = json.loads(feedback_path.read_text(encoding="utf-8"))
     lang     = args.lang
+    expressive = load_expressive(feedback_path, args.expressive)
  
-    system_prompt = build_system_prompt(feedback, lang)
+    system_prompt = build_system_prompt(feedback, lang, expressive)
     if args.dry_run:
         print(system_prompt)
         print("--- OPENING MESSAGE ---")
-        print(generate_opening(feedback, lang))
+        print(generate_opening(feedback, lang, expressive))
         return
 
     config   = load_config(args.provider, args.model, args.max_tokens)
@@ -380,6 +450,9 @@ def main(argv=None):
     print(f"  Session    : {feedback_path.stem}")
     print(f"  Scale      : {meta.get('scale', '?')}  |  BPM: {meta.get('bpm', '?')}")
     print(f"  Score      : {global_score}/100")
+    if expressive:
+        print(f"  Intention  : {expressive.get('emotion')}  |  heard as: "
+              f"{expressive['heard_as_name']}")
     print(f"  Model      : {config['model']}")
     print(f"  Language   : {lang}")
     print("  Type 'quit' or press Ctrl+C to end.")
@@ -387,7 +460,7 @@ def main(argv=None):
     print()
  
     # First turn — automatic context-aware opening
-    opening = generate_opening(feedback, lang)
+    opening = generate_opening(feedback, lang, expressive)
     you_label = "Vous" if lang == "fr" else "You"
     print(f"{you_label}: {opening}\n")
  
@@ -428,6 +501,7 @@ def main(argv=None):
         json.dump({
             "meta":       meta,
             "language":   lang,
+            "intention":  expressive.get("emotion") if expressive else None,
             "provider":   config["provider"],
             "model":      config["model"],
             "history":    history,

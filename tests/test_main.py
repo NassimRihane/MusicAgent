@@ -50,5 +50,48 @@ def test_full_pipeline_dry_run(tmp_path, capfd):
     fb = json.loads((tmp_path / "feedback_session_t.json").read_text())
     assert fb["harmony"]["harmony_score"] == 100
     out = capfd.readouterr().out
-    assert "--- SESSION DATA ---" in out
+    assert "--- CORRECTION CONTEXT ---" in out
     assert not (tmp_path / "conversation_feedback_session_t.json").exists()   # no chat
+
+
+def recorded_steps(monkeypatch, tmp_path, ready=True):
+    """Replace run_step with a recorder; returns the list of (script, args)."""
+    steps = []
+
+    def fake(title, script, *args):
+        steps.append((script, [str(a) for a in args]))
+        if script == "transcription.py":
+            write_json(tmp_path / "session_new.json", {})
+            (tmp_path / "session_new.wav").write_bytes(b"")   # the rf chord backend needs audio
+        return True
+    monkeypatch.setattr(pipeline, "run_step", fake)
+    monkeypatch.setattr(pipeline, "SESSIONS_DIR", tmp_path)
+    monkeypatch.setattr(pipeline, "emotion_model_ready", lambda: ready)
+    return steps
+
+
+def test_audio_and_emotion_run_every_step(tmp_path, monkeypatch):
+    steps = recorded_steps(monkeypatch, tmp_path)
+    pipeline.main(["--audio", "take.mp3", "--emotion", "sad", "--chords", "rf", "--model", "llama3.1"])
+    scripts = [s for s, _ in steps]
+    assert scripts == ["transcription.py", "chord_analysis.py", "feedback.py",
+                       "expressive_feedback.py", "agent.py"]
+    args = dict(steps)
+    assert args["transcription.py"] == ["--type", "major", "--audio", "take.mp3"]
+    assert args["expressive_feedback.py"][1:] == ["--emotion", "sad"]
+    assert args["agent.py"][1:] == ["--lang", "en", "--model", "llama3.1"]
+
+
+def test_emotion_step_skipped_without_model(tmp_path, monkeypatch, capsys):
+    steps = recorded_steps(monkeypatch, tmp_path, ready=False)
+    pipeline.main(["--audio", "take.mp3", "--emotion", "sad", "--no-chords"])
+    assert "expressive_feedback.py" not in [s for s, _ in steps]
+    assert "emotion_model.py --train" in capsys.readouterr().out
+
+
+def test_rf_chords_skipped_without_audio(tmp_path, monkeypatch, capsys):
+    steps = recorded_steps(monkeypatch, tmp_path)
+    session = write_json(tmp_path / "session_old.json", {})
+    pipeline.main(["--session", str(session), "--chords", "rf"])
+    assert "chord_analysis.py" not in [s for s, _ in steps]
+    assert "needs audio" in capsys.readouterr().out
