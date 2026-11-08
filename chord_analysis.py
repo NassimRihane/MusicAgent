@@ -7,12 +7,18 @@
 # tracker on the session WAV (or on the note onsets if there is no WAV).
 #
 # Backends:
-#   music21  (default)  chords named by music21 from the transcribed notes
+#   rf       (default)  Random Forest on beat-synchronous chroma of the audio
+#                       (chord_rf.py); chords are then named and placed in the
+#                       key by music21. Falls back to music21 without a WAV.
+#   music21             chords named by music21 from the transcribed notes
 #                       sounding in each beat — no machine learning
-#   rf                  Random Forest on beat-synchronous chroma of the audio
-#                       (chord_rf.py, trained on synthetic piano chords)
-#   both                runs both, saves music21's result and reports how
-#                       often the two agree on the chord's scale degree
+#   both                runs both, saves the Random Forest's result and
+#                       reports how often the two agree on the scale degree
+#
+# The Random Forest is the default because it is clearly more accurate on
+# realistic piano audio (chord_evaluation.py: 82 % vs 52 % majmin).
+# basic-pitch shortens held notes as the piano sound decays, so music21 often
+# names incomplete chords.
 #
 # Output files (written next to the input):
 #   session_XXX_chords.json   — machine-readable chord sequence
@@ -20,7 +26,7 @@
 #
 # Usage:
 #   python chord_analysis.py sessions/session_20260101_120000.json
-#   python chord_analysis.py sessions/session_20260101_120000.json --backend rf
+#   python chord_analysis.py sessions/session_20260101_120000.json --backend music21
 #   python chord_analysis.py sessions/session_20260101_120000.json --backend both
 
 import argparse
@@ -42,8 +48,8 @@ import recognition as rc
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Post-session chord analysis")
     parser.add_argument("input", help="Path to a session JSON (its WAV is used if present)")
-    parser.add_argument("--backend", default="music21", choices=["music21", "rf", "both"],
-                        help="'music21' (default, from notes), 'rf' (Random Forest on audio) "
+    parser.add_argument("--backend", default="rf", choices=["rf", "music21", "both"],
+                        help="'rf' (default, Random Forest on audio), 'music21' (from notes) "
                              "or 'both' (compare them)")
     return parser.parse_args(argv)
 
@@ -65,24 +71,24 @@ def session_key(session: dict, notes: list) -> str:
     return session.get("meta", {}).get("scale") or rc.detect_key(notes)["key"]
 
 
-def run_analysis(session: dict, audio: np.ndarray = None, backend: str = "music21") -> dict:
+def run_analysis(session: dict, audio: np.ndarray = None, backend: str = "rf") -> dict:
     """Chord segments for a session, plus RF/music21 agreement with backend='both'."""
     notes = rc.session_notes(session)
     key_name = session_key(session, notes)
     beats = rc.track_beats(notes=notes, audio=audio)["beat_times"]
 
+    if audio is None and backend != "music21":
+        print("  No WAV for this session: using the music21 backend (from notes).")
+        backend = "music21"
     result = {"key": key_name, "beats": len(beats)}
-    if backend in ("music21", "both"):
-        result["chords"] = rc.chords_from_notes(notes, beats, key_name)
     if backend in ("rf", "both"):
-        if audio is None:
-            raise SystemExit("ERROR: the rf backend needs the session WAV.")
         import chord_rf
-        rf = chord_rf.predict_chords(audio, beats, key_name)
-        if backend == "rf":
-            result["chords"] = rf
-        else:
-            result["agreement"] = degree_agreement(result["chords"], rf)
+        result["chords"] = chord_rf.predict_chords(audio, beats, key_name)
+    if backend == "music21":
+        result["chords"] = rc.chords_from_notes(notes, beats, key_name)
+    if backend == "both":
+        result["agreement"] = degree_agreement(result["chords"],
+                                               rc.chords_from_notes(notes, beats, key_name))
     return result
 
 

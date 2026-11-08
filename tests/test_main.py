@@ -42,7 +42,8 @@ def test_full_pipeline_dry_run(tmp_path, capfd):
                          make_session([event(0.5 + i * 0.5, [[60, 64, 67, 72][i % 4]])
                                        for i in range(8)]))
 
-    pipeline.main(["--session", str(session), "--score", "--dry-run"])
+    # music21 chords: the subprocesses must not need the trained model in models/
+    pipeline.main(["--session", str(session), "--score", "--dry-run", "--chords", "music21"])
 
     for name in ["session_t_chords.json", "session_t.musicxml",
                  "feedback_session_t.json", "feedback_session_t.txt"]:
@@ -89,9 +90,8 @@ def test_emotion_step_skipped_without_model(tmp_path, monkeypatch, capsys):
     assert "emotion_model.py --train" in capsys.readouterr().out
 
 
-def test_rf_chords_skipped_without_audio(tmp_path, monkeypatch, capsys):
+def test_chords_default_to_random_forest(tmp_path, monkeypatch):
     steps = recorded_steps(monkeypatch, tmp_path)
     session = write_json(tmp_path / "session_old.json", {})
-    pipeline.main(["--session", str(session), "--chords", "rf"])
-    assert "chord_analysis.py" not in [s for s, _ in steps]
-    assert "needs audio" in capsys.readouterr().out
+    pipeline.main(["--session", str(session)])
+    assert dict(steps)["chord_analysis.py"][1:] == ["--backend", "rf"]

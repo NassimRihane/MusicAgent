@@ -1,0 +1,535 @@
+{
+  "description": "Real-recording test of the chord recognisers (chord_evaluation.py --recording)",
+  "instructions": "Strike each chord once (both hands together), hold about 2 seconds, release, leave about 1 second of silence, then play the next chord. Play the 28 chords in order in one take.",
+  "chords": [
+    {
+      "number": 1,
+      "name": "C",
+      "label": "C",
+      "quality": "major",
+      "left_hand": "C2",
+      "right_hand": [
+        "C4",
+        "E4",
+        "G4"
+      ],
+      "pitches": [
+        36,
+        60,
+        64,
+        67
+      ]
+    },
+    {
+      "number": 2,
+      "name": "Am",
+      "label": "A:min",
+      "quality": "minor",
+      "left_hand": "A1",
+      "right_hand": [
+        "A3",
+        "C4",
+        "E4"
+      ],
+      "pitches": [
+        33,
+        57,
+        60,
+        64
+      ]
+    },
+    {
+      "number": 3,
+      "name": "F",
+      "label": "F",
+      "quality": "major",
+      "left_hand": "F2",
+      "right_hand": [
+        "F4",
+        "A4",
+        "C5"
+      ],
+      "pitches": [
+        41,
+        65,
+        69,
+        72
+      ]
+    },
+    {
+      "number": 4,
+      "name": "G7",
+      "label": "G:dom7",
+      "quality": "dominant 7th",
+      "left_hand": "G2",
+      "right_hand": [
+        "G4",
+        "B4",
+        "D5",
+        "F5"
+      ],
+      "pitches": [
+        43,
+        67,
+        71,
+        74,
+        77
+      ]
+    },
+    {
+      "number": 5,
+      "name": "Dm",
+      "label": "D:min",
+      "quality": "minor",
+      "left_hand": "D2",
+      "right_hand": [
+        "D4",
+        "F4",
+        "A4"
+      ],
+      "pitches": [
+        38,
+        62,
+        65,
+        69
+      ]
+    },
+    {
+      "number": 6,
+      "name": "E",
+      "label": "E",
+      "quality": "major",
+      "left_hand": "E2",
+      "right_hand": [
+        "E4",
+        "G#4",
+        "B4"
+      ],
+      "pitches": [
+        40,
+        64,
+        68,
+        71
+      ]
+    },
+    {
+      "number": 7,
+      "name": "Bdim",
+      "label": "B:dim",
+      "quality": "diminished",
+      "left_hand": "B1",
+      "right_hand": [
+        "B3",
+        "D4",
+        "F4"
+      ],
+      "pitches": [
+        35,
+        59,
+        62,
+        65
+      ]
+    },
+    {
+      "number": 8,
+      "name": "Cmaj7",
+      "label": "C:maj7",
+      "quality": "major 7th",
+      "left_hand": "C2",
+      "right_hand": [
+        "C4",
+        "E4",
+        "G4",
+        "B4"
+      ],
+      "pitches": [
+        36,
+        60,
+        64,
+        67,
+        71
+      ]
+    },
+    {
+      "number": 9,
+      "name": "F#m",
+      "label": "F#:min",
+      "quality": "minor",
+      "left_hand": "F#2",
+      "right_hand": [
+        "F#4",
+        "A4",
+        "C#5"
+      ],
+      "pitches": [
+        42,
+        66,
+        69,
+        73
+      ]
+    },
+    {
+      "number": 10,
+      "name": "Bb",
+      "label": "A#",
+      "quality": "major",
+      "left_hand": "Bb1",
+      "right_hand": [
+        "Bb3",
+        "D4",
+        "F4"
+      ],
+      "pitches": [
+        34,
+        58,
+        62,
+        65
+      ]
+    },
+    {
+      "number": 11,
+      "name": "Daug",
+      "label": "D:aug",
+      "quality": "augmented",
+      "left_hand": "D2",
+      "right_hand": [
+        "D4",
+        "F#4",
+        "A#4"
+      ],
+      "pitches": [
+        38,
+        62,
+        66,
+        70
+      ]
+    },
+    {
+      "number": 12,
+      "name": "D7",
+      "label": "D:dom7",
+      "quality": "dominant 7th",
+      "left_hand": "D2",
+      "right_hand": [
+        "D4",
+        "F#4",
+        "A4",
+        "C5"
+      ],
+      "pitches": [
+        38,
+        62,
+        66,
+        69,
+        72
+      ]
+    },
+    {
+      "number": 13,
+      "name": "Gm7",
+      "label": "G:min7",
+      "quality": "minor 7th",
+      "left_hand": "G2",
+      "right_hand": [
+        "G4",
+        "Bb4",
+        "D5",
+        "F5"
+      ],
+      "pitches": [
+        43,
+        67,
+        70,
+        74,
+        77
+      ]
+    },
+    {
+      "number": 14,
+      "name": "Ab",
+      "label": "G#",
+      "quality": "major",
+      "left_hand": "Ab1",
+      "right_hand": [
+        "Ab4",
+        "C5",
+        "Eb5"
+      ],
+      "pitches": [
+        32,
+        68,
+        72,
+        75
+      ]
+    },
+    {
+      "number": 15,
+      "name": "C#dim",
+      "label": "C#:dim",
+      "quality": "diminished",
+      "left_hand": "C#2",
+      "right_hand": [
+        "C#4",
+        "E4",
+        "G4"
+      ],
+      "pitches": [
+        37,
+        61,
+        64,
+        67
+      ]
+    },
+    {
+      "number": 16,
+      "name": "Ebmaj7",
+      "label": "D#:maj7",
+      "quality": "major 7th",
+      "left_hand": "Eb2",
+      "right_hand": [
+        "Eb4",
+        "G4",
+        "Bb4",
+        "D5"
+      ],
+      "pitches": [
+        39,
+        63,
+        67,
+        70,
+        74
+      ]
+    },
+    {
+      "number": 17,
+      "name": "Bm",
+      "label": "B:min",
+      "quality": "minor",
+      "left_hand": "B1",
+      "right_hand": [
+        "B3",
+        "D4",
+        "F#4"
+      ],
+      "pitches": [
+        35,
+        59,
+        62,
+        66
+      ]
+    },
+    {
+      "number": 18,
+      "name": "A7",
+      "label": "A:dom7",
+      "quality": "dominant 7th",
+      "left_hand": "A1",
+      "right_hand": [
+        "A3",
+        "C#4",
+        "E4",
+        "G4"
+      ],
+      "pitches": [
+        33,
+        57,
+        61,
+        64,
+        67
+      ]
+    },
+    {
+      "number": 19,
+      "name": "Fm7",
+      "label": "F:min7",
+      "quality": "minor 7th",
+      "left_hand": "F2",
+      "right_hand": [
+        "F4",
+        "Ab4",
+        "C5",
+        "Eb5"
+      ],
+      "pitches": [
+        41,
+        65,
+        68,
+        72,
+        75
+      ]
+    },
+    {
+      "number": 20,
+      "name": "Caug",
+      "label": "C:aug",
+      "quality": "augmented",
+      "left_hand": "C2",
+      "right_hand": [
+        "C4",
+        "E4",
+        "G#4"
+      ],
+      "pitches": [
+        36,
+        60,
+        64,
+        68
+      ]
+    },
+    {
+      "number": 21,
+      "name": "Gmaj7",
+      "label": "G:maj7",
+      "quality": "major 7th",
+      "left_hand": "G2",
+      "right_hand": [
+        "G4",
+        "B4",
+        "D5",
+        "F#5"
+      ],
+      "pitches": [
+        43,
+        67,
+        71,
+        74,
+        78
+      ]
+    },
+    {
+      "number": 22,
+      "name": "C#m",
+      "label": "C#:min",
+      "quality": "minor",
+      "left_hand": "C#2",
+      "right_hand": [
+        "C#4",
+        "E4",
+        "G#4"
+      ],
+      "pitches": [
+        37,
+        61,
+        64,
+        68
+      ]
+    },
+    {
+      "number": 23,
+      "name": "F#dim",
+      "label": "F#:dim",
+      "quality": "diminished",
+      "left_hand": "F#2",
+      "right_hand": [
+        "F#4",
+        "A4",
+        "C5"
+      ],
+      "pitches": [
+        42,
+        66,
+        69,
+        72
+      ]
+    },
+    {
+      "number": 24,
+      "name": "E7",
+      "label": "E:dom7",
+      "quality": "dominant 7th",
+      "left_hand": "E2",
+      "right_hand": [
+        "E4",
+        "G#4",
+        "B4",
+        "D5"
+      ],
+      "pitches": [
+        40,
+        64,
+        68,
+        71,
+        74
+      ]
+    },
+    {
+      "number": 25,
+      "name": "Em7",
+      "label": "E:min7",
+      "quality": "minor 7th",
+      "left_hand": "E2",
+      "right_hand": [
+        "E4",
+        "G4",
+        "B4",
+        "D5"
+      ],
+      "pitches": [
+        40,
+        64,
+        67,
+        71,
+        74
+      ]
+    },
+    {
+      "number": 26,
+      "name": "Dmaj7",
+      "label": "D:maj7",
+      "quality": "major 7th",
+      "left_hand": "D2",
+      "right_hand": [
+        "D4",
+        "F#4",
+        "A4",
+        "C#5"
+      ],
+      "pitches": [
+        38,
+        62,
+        66,
+        69,
+        73
+      ]
+    },
+    {
+      "number": 27,
+      "name": "G#dim",
+      "label": "G#:dim",
+      "quality": "diminished",
+      "left_hand": "G#1",
+      "right_hand": [
+        "G#4",
+        "B4",
+        "D5"
+      ],
+      "pitches": [
+        32,
+        68,
+        71,
+        74
+      ]
+    },
+    {
+      "number": 28,
+      "name": "Cm7",
+      "label": "C:min7",
+      "quality": "minor 7th",
+      "left_hand": "C2",
+      "right_hand": [
+        "C4",
+        "Eb4",
+        "G4",
+        "Bb4"
+      ],
+      "pitches": [
+        36,
+        60,
+        63,
+        67,
+        70
+      ]
+    }
+  ],
+  "notes": "Augmented triads are symmetric (C, E and G# augmented contain the same notes), so their root cannot be recovered from the sound alone; the root score of the two augmented chords reflects this. The majmin score ignores them, as in MIREX."
+}

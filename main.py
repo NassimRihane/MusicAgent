@@ -4,7 +4,7 @@
 #
 #   1. transcription.py        record from the microphone (Ctrl+C to stop),
 #                              or --audio FILE; basic-pitch on the full recording
-#   2. chord_analysis.py       chords and Roman numerals (music21, or --chords rf)
+#   2. chord_analysis.py       chords (Random Forest, or --chords music21) and Roman numerals
 #   3. json_to_score.py        sheet music (optional, --score)
 #   4. feedback.py             correction feedback (notes, rhythm, harmony)
 #   5. expressive_feedback.py  emotion heard vs intended (--emotion), with advice
@@ -45,8 +45,8 @@ def parse_args(argv=None):
     parser.add_argument("--bpm",    type=float, default=None, help="Intended tempo (default: estimated)")
     parser.add_argument("--device", type=int, default=None, help="Audio input device index")
     # Analysis options
-    parser.add_argument("--chords", default="music21", choices=["music21", "rf"],
-        help="Chord recogniser: music21 (default) or rf (Random Forest on audio)")
+    parser.add_argument("--chords", default="rf", choices=["rf", "music21"],
+        help="Chord recogniser: rf (default, Random Forest on audio) or music21 (from notes)")
     parser.add_argument("--no-chords", action="store_true", help="Skip chord analysis")
     parser.add_argument("--score",     action="store_true", help="Also export a MusicXML score")
     # Agent options (passed to agent.py)
@@ -129,12 +129,9 @@ def main(argv=None):
             print("ERROR: no session file was saved — nothing to analyse.")
             sys.exit(1)
 
-    # Step 2 — chords
-    has_wav = session.with_suffix(".wav").exists()
+    # Step 2 — chords (chord_analysis.py falls back to music21 if there is no WAV)
     if args.no_chords:
         print("\n  Chord analysis skipped (--no-chords).")
-    elif args.chords == "rf" and not has_wav:
-        print(f"\n  No WAV for {session.name}: the rf chord backend needs audio — skipped.")
     elif not run_step("2/5  Chord analysis", "chord_analysis.py", session, "--backend", args.chords):
         print("  Chord analysis failed — continuing without harmony feedback.")
 

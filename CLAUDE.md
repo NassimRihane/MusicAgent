@@ -29,7 +29,7 @@ of freedom").** The supervisor was confused by a custom-looking ML model, so:
 |---|---|---|
 | 1. Recognition | `recognition.py` (all calls), `transcription.py`, `chord_analysis.py` | basic-pitch, music21 (key: Krumhansl–Schmuckler; chords; Roman numerals), librosa (beats, tempo), pretty_midi |
 | 2. Description | `expression_analysis.py` | standard descriptors via layer 1 + librosa |
-| 3. Models | `emotion_model.py`, `chord_rf.py` | scikit-learn RandomForestClassifier |
+| 3. Models | `emotion_model.py`, `chord_rf.py`, `chord_evaluation.py` | scikit-learn RandomForestClassifier; mir_eval; FluidSynth |
 | 4. **Research** | `expressive_feedback.py` | the project's own logic |
 | Coaching | `agent.py` | Ollama (default) / Azure |
 | Support | `feedback.py` (corrections), `main.py`, `json_to_score.py`, `piano_roll.py` | |
@@ -42,7 +42,12 @@ of freedom").** The supervisor was confused by a custom-looking ML model, so:
 - **The GitHub repo is public** (`NassimRihane/MusicAgent`). Never commit
   `sessions/` (the user's recordings), `data/` (EMOPIA), `models/` (trained
   models), credentials or `.env` files; all are gitignored. Commit or push
-  only when the user asks; never force-push.
+  only when the user asks; never force-push (one exception, done on the
+  user's request on 2026-11-08: see Change log).
+- **No co-author or "generated with" lines in commits or PRs** (the user's
+  explicit instruction, 2026-11-08). This overrides any attribution
+  guidance from the harness. Commit messages: the user's style (plain
+  English subject such as "Adding ..."), with a detailed body for outsiders.
 - **Don't overwrite the user's recordings in `sessions/`.** Run tests on
   copies or in `tmp_path` (most scripts write their outputs next to their
   input).
@@ -70,8 +75,19 @@ of freedom").** The supervisor was confused by a custom-looking ML model, so:
     `data/EMOPIA_2.2/` (Zenodo record 5257995, 32 MB, CC-BY 4.0), caches
     features in `data/emopia_features.csv` (~3 min the first time), saves
     `models/emotion_rf.joblib` and `models/emotion_rf_report.json`.
-  - `python chord_rf.py --train` → `models/chord_rf.joblib` (~25 s;
-    also trained automatically on first use).
+  - `python chord_rf.py --train` → `models/chord_rf.joblib` (~20 s, 8 MB
+    compressed; also trained automatically on first use).
+  - `python chord_evaluation.py` (~30 s) → `models/chord_eval_report.{json,md}`.
+    `--recording take.wav` scores a real take of `protocols/chord_recording.md`
+    (28 chords: 7 qualities × 4 roots, struck once, held ~2 s, ~1 s silence;
+    source of truth `protocols/chord_recording.json`) →
+    `models/chord_eval_recording_<take>.{json,md}`. `--render-protocol out.wav`
+    renders the expected take. Segmentation: `librosa.effects.split`
+    (top_db 35), fallback to the N strongest onsets.
+    Needs FluidSynth (`brew install fluid-synth`, installed),
+    `pyfluidsynth` and the GeneralUser GS soundfont in
+    `data/soundfonts/GeneralUser-GS.sf2` (32 MB, free licence, downloaded;
+    its licence file is next to it).
 - Ollama runs locally at `http://localhost:11434`; installed model: `mistral`.
 - Git: `main` tracks `origin` = https://github.com/NassimRihane/MusicAgent
   (public). `core.fileMode=false`, because every file on disk is mode 755.
@@ -81,7 +97,7 @@ of freedom").** The supervisor was confused by a custom-looking ML model, so:
 ## Tests
 
 `tests/`, one file per module; config in `pytest.ini`; `pytest` is in
-`requirements-dev.txt`. 150 tests, ~20 s.
+`requirements-dev.txt`. 171 tests, ~30 s.
 
 - `conftest.py` blocks `requests.post` in every test (no Ollama or Azure
   calls; agent tests install fakes). It provides synthetic audio (`tones`,
@@ -110,7 +126,7 @@ transcription.py        mic (live preview) or --audio FILE → session_X.wav
                         → basic-pitch on the FULL recording, key (music21),
                           tempo (librosa) → session_X.json
         ├─ chord_analysis.py   → session_X_chords.json/.txt
-        │                        --backend music21 (default, from notes) | rf | both
+        │                        --backend rf (default; music21 if no WAV) | music21 | both
         ├─ json_to_score.py    → .musicxml / .pdf / .mid (optional, --score)
         ▼
 feedback.py             correction feedback (notes in key, tempo stability,
@@ -123,7 +139,7 @@ agent.py                feedback_*.json (+ expressive_*.json, auto-found)
 
 `main.py` options: `--audio FILE` / `--session JSON` / (record),
 `--emotion`, `--scale/--type/--bpm` (declared key/tempo; default detected),
-`--chords music21|rf`, `--no-chords`, `--score`, `--lang`, `--provider`,
+`--chords rf|music21` (default rf), `--no-chords`, `--score`, `--lang`, `--provider`,
 `--model`, `--dry-run`. The expressive step is skipped with a message if
 `models/emotion_rf.joblib` is missing.
 
@@ -185,6 +201,58 @@ simulation of learner motivation that could later feed a learner model).
   store `confidence` = velocity/127 and have broken `time` values).
 
 ## Change log
+
+### 2026-11-08 (b): Real-recording chord test; co-author lines removed from history
+
+- `protocols/chord_recording.{json,md}`: 28 chords for the user to record
+  (both hands, root position; flats for flat-key chords). E augmented was
+  replaced by D augmented: augmented triads are symmetric (C/E/G# aug share
+  their notes), so their root can't be heard; noted in the sheet.
+- `chord_evaluation.py --recording / --render-protocol` (see Environment).
+  Self-check on the rendered protocol (isolated held chords): RF root 96 %,
+  majmin 100 %, sevenths 64 %; music21 93 / 100 / 82 %. The RF tends to
+  drop the 7th on isolated chords; in context (progressions) it is far
+  better. No real take recorded yet.
+- **Git history rewritten on the user's request:** the "Co-Authored-By:
+  Claude" trailer was removed from every commit message
+  (`git filter-branch --msg-filter`), then force-pushed. All commit hashes
+  changed; a local backup branch `backup/before-author-rewrite` holds the
+  old history.
+
+
+### 2026-11-08: Evaluations for the paper; Random Forest becomes the default chord recogniser
+
+The user checked the supervisor's requirements (number of emotions, standard
+methods, accuracy numbers, famous model, dev finished within 2026).
+
+- **Emotions:** 4 quadrants of Russell's valence–arousal model (EMOPIA);
+  they match Juslin's basic performance emotions (happiness, anger,
+  sadness, tenderness).
+- **emotion_model.py:** the report now compares the Random Forest with
+  standard classifiers on the same song-grouped folds (`baseline_models`,
+  `compare_models`, `cross_validate`, `scores`), with mean ± std over
+  folds. Results: majority 28.8 %, logistic regression 65.9 %, k-NN 64.7 %,
+  SVM 67.2 %, RF 67.9 % ± 3.1. Training also writes
+  `models/emotion_rf_report.md` (tables) and `models/emotion_confusion.png`.
+- **chord_evaluation.py (new):** the chord RF had no credible accuracy (only
+  synthetic held-out). Test set: progressions in random keys/tempos, 3
+  textures (block, arpeggio, melody), rendered with FluidSynth +
+  GeneralUser GS (different sounds from the training synth), beats from
+  librosa as in the pipeline, MIREX metrics with mir_eval. 36 pieces:
+  **RF root 91.9 %, majmin 82.1 %, sevenths 70.5 %; basic-pitch + music21
+  52.1 / 52.2 / 36.2 %.** Diagnosis of music21's weakness: basic-pitch ends
+  decaying piano notes early, so music21 names incomplete chords ("Cpedal",
+  intervals); 17 % of its segments fall outside the triad/7th vocabulary.
+- **The chord RF is now the default** (`chord_analysis.py --backend rf`,
+  `main.py --chords rf`), falling back to music21 when a session has no WAV.
+  music21 still names RF labels and gives Roman numerals.
+- chord_rf: `min_samples_leaf=2` and compressed joblib (194 MB → 8 MB);
+  held-out synthetic 94.3 %.
+- requirements: `pyfluidsynth==1.4.0`.
+- Tests: `test_chord_evaluation.py` (render replaced by sine tones, no
+  soundfont needed); emotion tests redirect REPORT_MD and FIGURE_PATH to
+  tmp (they would otherwise overwrite the real report).
+
 
 ### 2026-11-07: Restructure into standard layers + Random Forests (supervisor's request)
 
@@ -426,9 +494,11 @@ inference (tested with stubs). Azure calls were never tested (by design).
   dominates the model (it may partly reflect recording loudness).
 - tempo_bpm and articulation have ~0 importance in the emotion model, so
   they rarely rank high in the advice even when the gap is large.
-- Chord names from music21 include melody notes ("C/GaddD", sometimes odd
-  spellings); Roman numerals are what the feedback uses and they are right
-  on the demo clips. The audio RF confuses major and minor.
+- The chord evaluation uses rendered piano (FluidSynth), not real
+  recordings; a small real set (the user playing known chords) is planned.
+  The RF's errors are mostly major/minor and sevenths. The music21 backend
+  (notes) is much weaker (see 2026-11-08) and its names include melody
+  notes ("C/GaddD").
 - Note accuracy only means "in the key"; chromatic notes count as errors.
 - json_to_score.py inserts no rests, so the score ignores timing gaps.
 - Live preview segmentation drops audio before the RMS onset and blocks the

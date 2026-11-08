@@ -11,7 +11,7 @@ Only the last layer is original research. Everything it relies on uses widely us
 |---|---|---|---|
 | 1. Recognition | notes, key, chords, tempo | [basic-pitch](https://github.com/spotify/basic-pitch) (Spotify), [music21](https://web.mit.edu/music21/), [librosa](https://librosa.org) | `recognition.py`, `transcription.py`, `chord_analysis.py` |
 | 2. Description | expressive descriptors: tempo, loudness, articulation, timing variation, register, mode… | standard descriptors computed with librosa and music21 | `expression_analysis.py` |
-| 3. Recognition models | emotion of a performance; chords from audio | **Random Forest** (scikit-learn) | `emotion_model.py`, `chord_rf.py` |
+| 3. Recognition models | emotion of a performance; chords from audio, with their evaluations | **Random Forest** (scikit-learn) | `emotion_model.py`, `chord_rf.py`, `chord_evaluation.py` |
 | 4. **Expressive feedback** | gap between intended and perceived emotion → prioritised advice | **this project's contribution** | `expressive_feedback.py` |
 | Coaching | conversation with the learner | local LLM (Ollama) or Azure OpenAI | `agent.py` |
 
@@ -19,15 +19,30 @@ Supporting steps: correction feedback on notes, tempo and harmony (`feedback.py`
 
 ### The emotion model
 
-A Random Forest trained on [EMOPIA](https://zenodo.org/records/5257995) (1,078 pop piano clips labelled in four emotion quadrants) from ten note-level descriptors. Evaluated by 5-fold cross-validation where each song stays in a single fold:
+A Random Forest trained on [EMOPIA](https://zenodo.org/records/5257995) (1,078 pop piano clips labelled in the four quadrants of Russell's valence–arousal model: happy/excited, tense/angry, sad, calm/relaxed) from ten note-level descriptors. Evaluated by 5-fold cross-validation where each song stays in a single fold, and compared with standard classifiers on the same folds (mean ± standard deviation over folds):
 
-| Task | Accuracy | Chance |
-|---|---|---|
-| 4 emotions (happy / tense / sad / calm) | 67.9 % | 28.9 % |
-| Arousal (energetic vs quiet) | 88.7 % | 50 % |
-| Valence (positive vs negative) | 75.4 % | 50 % |
+| Model | 4 emotions | Macro-F1 | Arousal (energetic vs quiet) | Valence (positive vs negative) |
+|---|---|---|---|---|
+| Majority class (chance) | 28.8 % ± 2.8 | 0.11 | 52.5 % | 51.8 % |
+| Logistic regression | 65.9 % ± 1.8 | 0.66 | 88.7 % | 73.6 % |
+| k-NN (k = 15) | 64.7 % ± 3.3 | 0.64 | 89.9 % | 70.9 % |
+| SVM (RBF kernel) | 67.2 % ± 2.3 | 0.67 | 89.6 % | 74.6 % |
+| **Random Forest** | **67.9 % ± 3.1** | **0.68** | 88.7 % | 75.4 % |
 
-The most important descriptors are loudness (MIDI velocity) and major/minor mode. Full report: `models/emotion_rf_report.json` (created by training).
+All classic classifiers reach a similar level, and the Random Forest is at least as good as the others. The most important descriptors are loudness (MIDI velocity) and major/minor mode. Training writes the full report (tables, confusion matrix figure, feature importances) to `models/emotion_rf_report.md` and `models/emotion_confusion.png`.
+
+### The chord model
+
+A Random Forest on beat-synchronous chroma (librosa), trained on synthetic piano chords (85 classes: 12 roots × major, minor, diminished, augmented, dominant 7th, major 7th, minor 7th, plus "no chord"). Chords are then named and placed in the key with music21.
+
+No chord-annotated piano recordings are freely available, so `chord_evaluation.py` builds a test set whose chords are known exactly: progressions in random keys and tempos, in three textures, rendered with sampled piano sounds (FluidSynth, GeneralUser GS soundfont), which differ from the synthetic training sounds. Scores are the standard MIREX chord metrics computed with mir_eval (36 pieces, mean ± standard deviation):
+
+| Recogniser | Root | Major/minor | Sevenths |
+|---|---|---|---|
+| **Random Forest** (audio) | **91.9 % ± 7.0** | **82.1 % ± 13.9** | **70.5 % ± 20.6** |
+| basic-pitch transcription + music21 naming | 52.1 % ± 17.2 | 52.2 % ± 16.2 | 36.2 % ± 22.2 |
+
+The Random Forest is therefore the default chord recogniser. The note-based alternative suffers from transcription: as a piano chord decays, basic-pitch ends the notes early and music21 names incomplete chords. Per-texture results are in `models/chord_eval_report.md`.
 
 ### The expressive feedback (research part)
 
@@ -54,6 +69,17 @@ ollama pull mistral
 .venv311/bin/python chord_rf.py --train
 ```
 
+To re-run the chord evaluation, install FluidSynth and the soundfont (32 MB, free licence):
+
+```bash
+brew install fluid-synth
+mkdir -p data/soundfonts
+curl -L -o data/soundfonts/GeneralUser-GS.sf2 https://github.com/mrbumpy409/GeneralUser-GS/raw/main/GeneralUser-GS.sf2
+.venv311/bin/python chord_evaluation.py
+.venv311/bin/python chord_evaluation.py --render-protocol expected.wav   # hear the 28-chord test
+.venv311/bin/python chord_evaluation.py --recording take.wav             # score a real take
+```
+
 ## Usage
 
 ```bash
@@ -73,7 +99,7 @@ Emotions: happy, excited, tense, angry, sad, melancholic, calm, relaxed, tender�
 
 ```bash
 .venv311/bin/python transcription.py --audio take.mp3               # session JSON + WAV
-.venv311/bin/python chord_analysis.py sessions/session_X.json --backend both   # music21 vs Random Forest
+.venv311/bin/python chord_analysis.py sessions/session_X.json --backend both   # Random Forest vs music21
 .venv311/bin/python expressive_feedback.py sessions/session_X.json --emotion sad
 .venv311/bin/python emotion_model.py --predict take.mp3
 
@@ -101,7 +127,8 @@ Early experiments are in `prototypes/`.
 
 - EMOPIA is pop piano transcribed from YouTube recordings. Its notes include the sustain pedal and come from a different transcription system than basic-pitch, so typical values (articulation especially) are not directly comparable with our transcriptions.
 - Without the score of the piece, rhythm can only be judged as *stable or not*, not *correct*: an intentional rubato and an unsteady pulse look the same.
-- Chords from the audio Random Forest agree with music21's on the scale degree about 60–70 % of the time on real piano; it often confuses major and minor.
+- The chord evaluation uses rendered piano. A real-recording check is ready: play the 28 chords of [`protocols/chord_recording.md`](protocols/chord_recording.md), then run `python chord_evaluation.py --recording take.wav`. On cleanly held, isolated chords (rendered), the note-based path is better on sevenths (82 % vs 64 %); in musical context, the Random Forest is far better (table above).
+- The chord Random Forest's errors are mostly between major and minor, and on sevenths.
 
 ## Tests
 
@@ -120,4 +147,7 @@ Tests use synthesised audio, miniature datasets and fake LLM responses: they nee
 - **music21**: M. S. Cuthbert, C. Ariza, "music21: A Toolkit for Computer-Aided Musicology and Symbolic Music Data", ISMIR 2010.
 - **librosa**: B. McFee et al., "librosa: Audio and Music Signal Analysis in Python", SciPy 2015.
 - **scikit-learn**: F. Pedregosa et al., "Scikit-learn: Machine Learning in Python", JMLR 2011.
+- **mir_eval**: C. Raffel et al., "mir_eval: A Transparent Implementation of Common MIR Metrics", ISMIR 2014.
+- **GeneralUser GS** soundfont by S. Christian Collins (free licence), rendered with FluidSynth.
+- Emotion model: J. A. Russell, "A Circumplex Model of Affect", Journal of Personality and Social Psychology, 1980.
 - Emotion cues: P. N. Juslin, P. Laukka, "Communication of Emotions in Vocal Expression and Music Performance", Psychological Bulletin, 2003.

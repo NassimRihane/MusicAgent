@@ -168,7 +168,8 @@ def train(per_class: int = 40, seed: int = 0, path: Path = MODEL_PATH, verbose: 
     t0 = time.time()
     X, y = make_dataset(per_class, seed)
     Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, stratify=y, random_state=seed)
-    rf = RandomForestClassifier(n_estimators=300, random_state=seed, n_jobs=N_JOBS)
+    rf = RandomForestClassifier(n_estimators=300, min_samples_leaf=2,
+                                random_state=seed, n_jobs=N_JOBS)
     rf.fit(Xtr, ytr)
     acc = float(rf.score(Xte, yte))
     rf.fit(X, y)   # final model on all examples
@@ -176,7 +177,7 @@ def train(per_class: int = 40, seed: int = 0, path: Path = MODEL_PATH, verbose: 
     bundle = {"model": rf, "vocab": VOCAB, "per_class": per_class, "seed": seed,
               "heldout_accuracy": round(acc, 3)}
     path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(bundle, path)
+    joblib.dump(bundle, path, compress=3)
     if verbose:
         print(f"  Chord RF: {len(y)} synthetic examples, held-out accuracy {acc:.1%} "
               f"({time.time() - t0:.0f}s) → {path}")

@@ -17,7 +17,15 @@
 #
 # Evaluation is 5-fold cross-validation grouped by song, so clips of the same
 # song are never split between training and test. Feature importance is
-# measured by permutation importance on the test folds.
+# measured by permutation importance on the test folds. The Random Forest is
+# compared with standard classifiers (majority class, logistic regression,
+# k-NN, SVM) on the same folds.
+#
+# Training writes, in models/:
+#   emotion_rf.joblib          the model, feature profiles and metrics
+#   emotion_rf_report.json     metrics, comparison table, importances
+#   emotion_rf_report.md       the same as tables, ready for a paper
+#   emotion_confusion.png      confusion matrix figure
 #
 # Usage:
 #   python emotion_model.py --train                 # downloads EMOPIA if needed (32 MB)
@@ -62,6 +70,8 @@ EMOPIA_URL  = "https://zenodo.org/records/5257995/files/EMOPIA_2.2.zip?download=
 FEATURES_CSV = DATA_DIR / "emopia_features.csv"
 MODEL_PATH  = ROOT / "models" / "emotion_rf.joblib"
 REPORT_PATH = ROOT / "models" / "emotion_rf_report.json"
+REPORT_MD   = ROOT / "models" / "emotion_rf_report.md"
+FIGURE_PATH = ROOT / "models" / "emotion_confusion.png"
 
 FEATURES = ea.NOTE_FEATURES
 N_TREES  = 500
@@ -157,32 +167,86 @@ def song_folds(groups: np.ndarray, n_splits: int = 5) -> list:
     return list(GroupKFold(n_splits=n_splits).split(np.zeros(len(groups)), groups=groups))
 
 
+def arousal(q: str) -> str:
+    return "high" if q in ("Q1", "Q2") else "low"
+
+
+def valence(q: str) -> str:
+    return "positive" if q in ("Q1", "Q4") else "negative"
+
+
+def scores(y: np.ndarray, pred: np.ndarray, fold_accuracies: list) -> dict:
+    """Accuracy (overall, mean ± std over folds), macro-F1, arousal and valence accuracy."""
+    from sklearn.metrics import accuracy_score, f1_score
+    return {
+        "accuracy":         round(float(accuracy_score(y, pred)), 3),
+        "accuracy_mean":    round(float(np.mean(fold_accuracies)), 3),
+        "accuracy_std":     round(float(np.std(fold_accuracies)), 3),
+        "macro_f1":         round(float(f1_score(y, pred, average="macro")), 3),
+        "arousal_accuracy": round(float(np.mean([arousal(a) == arousal(b) for a, b in zip(y, pred)])), 3),
+        "valence_accuracy": round(float(np.mean([valence(a) == valence(b) for a, b in zip(y, pred)])), 3),
+    }
+
+
+def cross_validate(model_factory, X: np.ndarray, y: np.ndarray, groups: np.ndarray):
+    """Song-grouped predictions for every clip, and the accuracy of each fold."""
+    pred, fold_accuracies, models = np.empty_like(y), [], []
+    for train, test in song_folds(groups):
+        model = model_factory().fit(X[train], y[train])
+        pred[test] = model.predict(X[test])
+        fold_accuracies.append(float(np.mean(pred[test] == y[test])))
+        models.append((model, test))
+    return pred, fold_accuracies, models
+
+
 def evaluate(X: np.ndarray, y: np.ndarray, groups: np.ndarray, seed: int = 0) -> dict:
     """5-fold cross-validation grouped by song + permutation importance on the test folds."""
     from sklearn.inspection import permutation_importance
-    from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
+    from sklearn.metrics import confusion_matrix
 
     classes = sorted(set(y))
-    pred = np.empty_like(y)
-    importances = []
-    for train, test in song_folds(groups):
-        rf = make_forest(seed).fit(X[train], y[train])
-        pred[test] = rf.predict(X[test])
-        imp = permutation_importance(rf, X[test], y[test], n_repeats=10, random_state=seed)
-        importances.append(imp.importances_mean)
-
-    arousal = lambda q: "high" if q in ("Q1", "Q2") else "low"
-    valence = lambda q: "positive" if q in ("Q1", "Q4") else "negative"
+    pred, fold_accuracies, models = cross_validate(lambda: make_forest(seed), X, y, groups)
+    importances = [permutation_importance(m, X[test], y[test], n_repeats=10,
+                                          random_state=seed).importances_mean
+                   for m, test in models]
     return {
-        "accuracy":         round(float(accuracy_score(y, pred)), 3),
-        "macro_f1":         round(float(f1_score(y, pred, average="macro")), 3),
-        "chance":           round(max(np.mean(y == c) for c in classes), 3),
-        "arousal_accuracy": round(float(np.mean([arousal(a) == arousal(b) for a, b in zip(y, pred)])), 3),
-        "valence_accuracy": round(float(np.mean([valence(a) == valence(b) for a, b in zip(y, pred)])), 3),
-        "classes":          classes,
-        "confusion":        confusion_matrix(y, pred, labels=classes).tolist(),
-        "importance":       {f: round(float(v), 4) for f, v in zip(FEATURES, np.mean(importances, axis=0))},
+        **scores(y, pred, fold_accuracies),
+        "chance":     round(max(np.mean(y == c) for c in classes), 3),
+        "classes":    classes,
+        "confusion":  confusion_matrix(y, pred, labels=classes).tolist(),
+        "importance": {f: round(float(v), 4) for f, v in zip(FEATURES, np.mean(importances, axis=0))},
     }
+
+
+def baseline_models(seed: int = 0) -> dict:
+    """Standard classifiers the Random Forest is compared with (features standardised)."""
+    from sklearn.dummy import DummyClassifier
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.neighbors import KNeighborsClassifier
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.svm import SVC
+    return {
+        "Majority class":      lambda: DummyClassifier(strategy="most_frequent"),
+        "Logistic regression": lambda: make_pipeline(StandardScaler(), LogisticRegression(
+                                   max_iter=2000, class_weight="balanced")),
+        "k-NN (k=15)":         lambda: make_pipeline(StandardScaler(), KNeighborsClassifier(15)),
+        "SVM (RBF kernel)":    lambda: make_pipeline(StandardScaler(), SVC(
+                                   class_weight="balanced", random_state=seed)),
+    }
+
+
+def compare_models(X: np.ndarray, y: np.ndarray, groups: np.ndarray, rf_metrics: dict,
+                   seed: int = 0) -> list:
+    """Comparison table: each baseline on the same folds, then the Random Forest."""
+    rows = []
+    for name, factory in baseline_models(seed).items():
+        pred, fold_accuracies, _ = cross_validate(factory, X, y, groups)
+        rows.append({"model": name, **scores(y, pred, fold_accuracies)})
+    keys = ("accuracy", "accuracy_mean", "accuracy_std", "macro_f1",
+            "arousal_accuracy", "valence_accuracy")
+    rows.append({"model": "Random Forest", **{k: rf_metrics[k] for k in keys}})
+    return rows
 
 
 def quadrant_profiles(rows: list) -> dict:
@@ -207,6 +271,7 @@ def train(seed: int = 0, verbose: bool = True) -> dict:
     groups = np.array([r["song"] for r in rows])
 
     metrics = evaluate(X, y, groups, seed)
+    metrics["comparison"] = compare_models(X, y, groups, metrics, seed)
     model = make_forest(seed).fit(X, y)
     bundle = {"model": model, "features": FEATURES, "classes": list(model.classes_),
               "profiles": quadrant_profiles(rows), "metrics": metrics,
@@ -215,16 +280,66 @@ def train(seed: int = 0, verbose: bool = True) -> dict:
     joblib.dump(bundle, MODEL_PATH)
     REPORT_PATH.write_text(json.dumps({k: v for k, v in bundle.items() if k != "model"},
                                       indent=2), encoding="utf-8")
+    REPORT_MD.write_text(markdown_report(bundle), encoding="utf-8")
+    save_confusion_figure(metrics, FIGURE_PATH)
     if verbose:
         print_report(bundle)
     return bundle
 
 
+def markdown_report(bundle: dict) -> str:
+    """The evaluation as Markdown tables (comparison, confusion matrix, importance)."""
+    m = bundle["metrics"]
+    lines = [f"# Emotion recognition — {bundle['trained_on']}", "",
+             "5-fold cross-validation grouped by song (no song in both training and test).",
+             "Accuracy: mean ± standard deviation over the 5 folds.", "",
+             "| Model | 4 quadrants | Macro-F1 | Arousal | Valence |",
+             "|---|---|---|---|---|"]
+    for r in m["comparison"]:
+        lines.append(f"| {r['model']} | {r['accuracy_mean']:.1%} ± {r['accuracy_std']:.1%} | "
+                     f"{r['macro_f1']:.2f} | {r['arousal_accuracy']:.1%} | {r['valence_accuracy']:.1%} |")
+    lines += ["", "## Confusion matrix (Random Forest; rows = true, columns = predicted)", "",
+              "| | " + " | ".join(f"{c} {QUADRANTS[c]}" for c in m["classes"]) + " |",
+              "|---" * (len(m["classes"]) + 1) + "|"]
+    for c, row in zip(m["classes"], m["confusion"]):
+        lines.append(f"| **{c} {QUADRANTS[c]}** | " + " | ".join(str(v) for v in row) + " |")
+    lines += ["", "## Permutation importance (mean accuracy drop when a feature is shuffled)", "",
+              "| Feature | Importance |", "|---|---|"]
+    for f, v in sorted(m["importance"].items(), key=lambda kv: -kv[1]):
+        lines.append(f"| {f} | {v:+.4f} |")
+    return "\n".join(lines) + "\n"
+
+
+def save_confusion_figure(metrics: dict, path: Path):
+    """Row-normalised confusion matrix as a PNG."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    cm = np.array(metrics["confusion"], dtype=float)
+    norm = cm / cm.sum(axis=1, keepdims=True)
+    labels = [f"{c}\n{QUADRANTS[c]}" for c in metrics["classes"]]
+    fig, ax = plt.subplots(figsize=(5.6, 4.8))
+    ax.imshow(norm, cmap="Blues", vmin=0, vmax=1)
+    for i in range(len(cm)):
+        for j in range(len(cm)):
+            ax.text(j, i, f"{norm[i, j]:.0%}\n({int(cm[i, j])})", ha="center", va="center",
+                    fontsize=9, color="white" if norm[i, j] > 0.5 else "#14171c")
+    ax.set_xticks(range(len(cm)), labels, fontsize=8)
+    ax.set_yticks(range(len(cm)), labels, fontsize=8)
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("True")
+    ax.set_title(f"Random Forest — accuracy {metrics['accuracy']:.1%}", fontsize=11)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=200)
+    plt.close(fig)
+
+
 def print_report(bundle: dict):
     m = bundle["metrics"]
     print(f"\n  Emotion Random Forest — {bundle['trained_on']}")
-    print(f"  4-quadrant accuracy : {m['accuracy']:.1%}  (chance {m['chance']:.1%}, "
-          f"macro-F1 {m['macro_f1']:.2f})")
+    print(f"  4-quadrant accuracy : {m['accuracy_mean']:.1%} ± {m['accuracy_std']:.1%} over folds "
+          f"(chance {m['chance']:.1%}, macro-F1 {m['macro_f1']:.2f})")
     print(f"  Arousal (high/low)  : {m['arousal_accuracy']:.1%}")
     print(f"  Valence (pos/neg)   : {m['valence_accuracy']:.1%}")
     print("  Confusion (rows = true, cols = predicted):")
@@ -234,7 +349,14 @@ def print_report(bundle: dict):
     print("  Permutation importance:")
     for f, v in sorted(m["importance"].items(), key=lambda kv: -kv[1]):
         print(f"    {f:<20} {v:+.4f}")
+    if m.get("comparison"):
+        print("  Comparison (same folds):")
+        print(f"    {'model':<22} {'4 quadrants':>15} {'F1':>5} {'arousal':>8} {'valence':>8}")
+        for r in m["comparison"]:
+            print(f"    {r['model']:<22} {r['accuracy_mean']:6.1%} ± {r['accuracy_std']:4.1%} "
+                  f"{r['macro_f1']:5.2f} {r['arousal_accuracy']:8.1%} {r['valence_accuracy']:8.1%}")
     print(f"  Saved: {MODEL_PATH}")
+    print(f"         {REPORT_MD}  |  {FIGURE_PATH}")
 
 
 

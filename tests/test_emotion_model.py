@@ -97,7 +97,11 @@ def test_train_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr(em, "build_feature_table", lambda: rows)
     monkeypatch.setattr(em, "MODEL_PATH", tmp_path / "emotion.joblib")
     monkeypatch.setattr(em, "REPORT_PATH", tmp_path / "report.json")
+    monkeypatch.setattr(em, "REPORT_MD", tmp_path / "report.md")
+    monkeypatch.setattr(em, "FIGURE_PATH", tmp_path / "confusion.png")
     bundle = em.train(verbose=False)
+    assert (tmp_path / "confusion.png").stat().st_size > 0
+    assert "| Random Forest |" in (tmp_path / "report.md").read_text()
     assert em.load(tmp_path / "emotion.joblib")["classes"] == ["Q1", "Q2", "Q3", "Q4"]
     report = json.loads((tmp_path / "report.json").read_text())
     assert report["metrics"]["accuracy"] == bundle["metrics"]["accuracy"]
@@ -107,3 +111,24 @@ def test_train_end_to_end(tmp_path, monkeypatch):
 def test_load_missing_model(tmp_path):
     with pytest.raises(FileNotFoundError):
         em.load(tmp_path / "missing.joblib")
+
+
+def test_comparison_includes_baselines_on_same_folds():
+    X, y, g = as_arrays(synthetic_rows())
+    rf = em.evaluate(X, y, g)
+    table = em.compare_models(X, y, g, rf)
+    assert [r["model"] for r in table] == ["Majority class", "Logistic regression",
+                                           "k-NN (k=15)", "SVM (RBF kernel)", "Random Forest"]
+    by_name = {r["model"]: r for r in table}
+    assert by_name["Majority class"]["accuracy_mean"] < 0.4 < by_name["Random Forest"]["accuracy_mean"]
+    assert by_name["Random Forest"]["accuracy_mean"] == rf["accuracy_mean"]
+    assert all(r["accuracy_std"] >= 0 for r in table)
+
+
+def test_markdown_report_tables():
+    X, y, g = as_arrays(synthetic_rows())
+    metrics = em.evaluate(X, y, g)
+    metrics["comparison"] = em.compare_models(X, y, g, metrics)
+    md = em.markdown_report({"metrics": metrics, "trained_on": "synthetic"})
+    assert md.count("| Majority class |") == 1 and "| **Q3 sad** |" in md
+    assert "| velocity_mean |" in md
