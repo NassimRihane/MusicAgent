@@ -90,8 +90,8 @@ def test_emotion_step_skipped_without_model(tmp_path, monkeypatch, capsys):
     assert "emotion_model.py --train" in capsys.readouterr().out
 
 
-def test_chords_default_to_random_forest(tmp_path, monkeypatch):
+def test_chords_default_to_music21(tmp_path, monkeypatch):
     steps = recorded_steps(monkeypatch, tmp_path)
     session = write_json(tmp_path / "session_old.json", {})
     pipeline.main(["--session", str(session)])
-    assert dict(steps)["chord_analysis.py"][1:] == ["--backend", "rf"]
+    assert dict(steps)["chord_analysis.py"][1:] == ["--backend", "music21"]

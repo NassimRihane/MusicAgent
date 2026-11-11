@@ -98,7 +98,7 @@ def test_rf_backend_falls_back_to_music21_without_audio(capsys):
 def test_both_backends_report_agreement(progression_audio, small_model, monkeypatch):
     monkeypatch.setattr(chord_rf, "load", lambda *a, **k: small_model)
     result = ca.run_analysis(progression_session(), progression_audio, "both")
-    assert result["chords"][0]["method"] == "rf"
+    assert result["chords"][0]["method"] == "music21"
     assert result["agreement"] > 0.8
 
 
@@ -121,9 +121,12 @@ def test_main_writes_chord_files(tmp_path, progression_audio, small_model, monke
     monkeypatch.setattr(chord_rf, "load", lambda *a, **k: small_model)
     session = write_json(tmp_path / "session_t.json", progression_session())
     sf.write(tmp_path / "session_t.wav", progression_audio, SR)
-    ca.main([str(session)])   # default backend: Random Forest
+    ca.main([str(session)])   # default backend: music21
     out = json.loads((tmp_path / "session_t_chords.json").read_text())
-    assert out["key"] == "C major" and out["chord_method"] == "rf"
+    assert out["key"] == "C major" and out["chord_method"] == "music21"
+    ca.main([str(session), "--backend", "rf"])
+    out = json.loads((tmp_path / "session_t_chords.json").read_text())
+    assert out["chord_method"] == "rf"
     assert {c["fit"] for c in out["chords"]} <= {"in_scale", "no_chord"}
     assert "ROMAN" in (tmp_path / "session_t_chords.txt").read_text()
 

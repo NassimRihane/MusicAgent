@@ -7,18 +7,21 @@
 # tracker on the session WAV (or on the note onsets if there is no WAV).
 #
 # Backends:
-#   rf       (default)  Random Forest on beat-synchronous chroma of the audio
-#                       (chord_rf.py); chords are then named and placed in the
-#                       key by music21. Falls back to music21 without a WAV.
-#   music21             chords named by music21 from the transcribed notes
+#   music21  (default)  chords named by music21 from the transcribed notes
 #                       sounding in each beat — no machine learning
-#   both                runs both, saves the Random Forest's result and
-#                       reports how often the two agree on the scale degree
+#   rf                  Random Forest on beat-synchronous chroma of the audio
+#                       (chord_rf.py); chords are then named and placed in the
+#                       key by music21. Needs the session WAV.
+#   both                runs both, saves music21's result and reports how
+#                       often the two agree on the scale degree
 #
-# The Random Forest is the default because it is clearly more accurate on
-# realistic piano audio (chord_evaluation.py: 82 % vs 52 % majmin).
-# basic-pitch shortens held notes as the piano sound decays, so music21 often
-# names incomplete chords.
+# Why music21 is the default (docs/decisions.md, figures/chord_*):
+# on a real piano recording (28-chord protocol) it recognises 95 % of the
+# chords including sevenths, against 45 % for the Random Forest, which never
+# outputs a seventh or diminished chord on real audio (its training data is
+# synthetic). The Random Forest is better on rendered progressions in context
+# (82 % vs 52 % majmin), but the real recording is the more direct evidence,
+# and chords only feed the correction context, not the expressive advice.
 #
 # Output files (written next to the input):
 #   session_XXX_chords.json   — machine-readable chord sequence
@@ -26,7 +29,7 @@
 #
 # Usage:
 #   python chord_analysis.py sessions/session_20260101_120000.json
-#   python chord_analysis.py sessions/session_20260101_120000.json --backend music21
+#   python chord_analysis.py sessions/session_20260101_120000.json --backend rf
 #   python chord_analysis.py sessions/session_20260101_120000.json --backend both
 
 import argparse
@@ -48,8 +51,8 @@ import recognition as rc
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Post-session chord analysis")
     parser.add_argument("input", help="Path to a session JSON (its WAV is used if present)")
-    parser.add_argument("--backend", default="rf", choices=["rf", "music21", "both"],
-                        help="'rf' (default, Random Forest on audio), 'music21' (from notes) "
+    parser.add_argument("--backend", default="music21", choices=["music21", "rf", "both"],
+                        help="'music21' (default, from notes), 'rf' (Random Forest on audio) "
                              "or 'both' (compare them)")
     return parser.parse_args(argv)
 
@@ -71,7 +74,7 @@ def session_key(session: dict, notes: list) -> str:
     return session.get("meta", {}).get("scale") or rc.detect_key(notes)["key"]
 
 
-def run_analysis(session: dict, audio: np.ndarray = None, backend: str = "rf") -> dict:
+def run_analysis(session: dict, audio: np.ndarray = None, backend: str = "music21") -> dict:
     """Chord segments for a session, plus RF/music21 agreement with backend='both'."""
     notes = rc.session_notes(session)
     key_name = session_key(session, notes)
@@ -81,14 +84,15 @@ def run_analysis(session: dict, audio: np.ndarray = None, backend: str = "rf") -
         print("  No WAV for this session: using the music21 backend (from notes).")
         backend = "music21"
     result = {"key": key_name, "beats": len(beats)}
+    if backend in ("music21", "both"):
+        result["chords"] = rc.chords_from_notes(notes, beats, key_name)
     if backend in ("rf", "both"):
         import chord_rf
-        result["chords"] = chord_rf.predict_chords(audio, beats, key_name)
-    if backend == "music21":
-        result["chords"] = rc.chords_from_notes(notes, beats, key_name)
-    if backend == "both":
-        result["agreement"] = degree_agreement(result["chords"],
-                                               rc.chords_from_notes(notes, beats, key_name))
+        rf = chord_rf.predict_chords(audio, beats, key_name)
+        if backend == "rf":
+            result["chords"] = rf
+        else:
+            result["agreement"] = degree_agreement(result["chords"], rf)
     return result
 
 

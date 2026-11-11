@@ -97,7 +97,7 @@ of freedom").** The supervisor was confused by a custom-looking ML model, so:
 ## Tests
 
 `tests/`, one file per module; config in `pytest.ini`; `pytest` is in
-`requirements-dev.txt`. 171 tests, ~30 s.
+`requirements-dev.txt`. 173 tests, ~30 s.
 
 - `conftest.py` blocks `requests.post` in every test (no Ollama or Azure
   calls; agent tests install fakes). It provides synthetic audio (`tones`,
@@ -126,7 +126,7 @@ transcription.py        mic (live preview) or --audio FILE → session_X.wav
                         → basic-pitch on the FULL recording, key (music21),
                           tempo (librosa) → session_X.json
         ├─ chord_analysis.py   → session_X_chords.json/.txt
-        │                        --backend rf (default; music21 if no WAV) | music21 | both
+        │                        --backend music21 (default) | rf (needs WAV) | both
         ├─ json_to_score.py    → .musicxml / .pdf / .mid (optional, --score)
         ▼
 feedback.py             correction feedback (notes in key, tempo stability,
@@ -139,7 +139,7 @@ agent.py                feedback_*.json (+ expressive_*.json, auto-found)
 
 `main.py` options: `--audio FILE` / `--session JSON` / (record),
 `--emotion`, `--scale/--type/--bpm` (declared key/tempo; default detected),
-`--chords rf|music21` (default rf), `--no-chords`, `--score`, `--lang`, `--provider`,
+`--chords music21|rf` (default music21), `--no-chords`, `--score`, `--lang`, `--provider`,
 `--model`, `--dry-run`. The expressive step is skipped with a message if
 `models/emotion_rf.joblib` is missing.
 
@@ -201,6 +201,113 @@ simulation of learner motivation that could later feed a learner model).
   store `confidence` = velocity/127 and have broken `time` values).
 
 ## Change log
+
+### 2026-11-12 (b): Mid-term deck draft
+
+- `presentation/midterm_draft.pptx` (gitignored): 10 slides + 3 backup,
+  English, speaker notes on every slide, native charts and tables (for
+  editing after import into Canva: Create a design → Import file). No Canva
+  connector in Claude Code. Built by `presentation/build_deck.js`
+  (pptxgenjs; rebuild: `NODE_PATH=<dir with pptxgenjs>/node_modules node
+  presentation/build_deck.js <project root> <out.pptx>`; numbers are
+  hard-coded from the reports of 2026-11-12). Visual QA done (LibreOffice
+  render). Installed for this: Homebrew `node`, `poppler`, LibreOffice
+  cask; pptxgenjs 3.12.0 in the scratchpad.
+- Slide order: title · apps vs teacher + research goal · 4 layers ·
+  scope/exclusions · emotion model (quadrants, RF vs baselines) · advice
+  design (Clair de lune normal, sad 25 → 42 %) · demo two takes (5/8 cues,
+  model 25 → 27 %) · finding: velocity ignores level · chords as an example
+  of justified choice · next steps (dark). Backup: confusion, importance,
+  chords by type.
+
+
+### 2026-11-12: Second sad take; basic-pitch velocity is level-invariant
+
+- `clair_de_lune_sad2.wav` (played again by the user): slower (performance
+  41.85 → 46.93 s, 89 → 80 BPM), more rubato (timing_variability 0.81 →
+  0.88, feedback flags "tempo varies"), recording 12.6 dB quieter, less
+  dynamic range in the audio (24.9 → 9.3 dB), lower register; literature
+  check (expression_analysis, Juslin directions): 5 agree (slower,
+  quieter recording, lower register, more rubato, less dynamic range),
+  2 no change (mode, articulation), 1 opposite (brightness). But the RF barely moves (sad 25 → 27 %, heard
+  Q1 28 % / Q3 27 % / Q4 28 %) because velocity_mean is unchanged
+  (77.6 → 77.5); the advice still says "play softer".
+- **Finding: basic-pitch's velocity ignores the recording level.** Same
+  take scaled by 0/−12/−24 dB → mean velocity 77.8 / 79.9 / 81.2. Velocity
+  measures dynamics within a take, not overall softness, so the model's top
+  cue can't hear a uniformly softer performance, and "play softer" advice is
+  unreliable. docs/decisions.md §4 corrected (the earlier "loudness means
+  touch" statement was wrong). Fix planned after the mid-term: controlled
+  recording setup + relate audio level to the model.
+- Demo files: `expression_sad2.json` (Normal vs Sad version 2),
+  `expressive_clair_de_lune_sad2.json`; `clair_de_lune_sad.wav` (first sad
+  take) differed from the normal one mainly by recording level.
+
+
+### 2026-11-11: Clair de lune demo (the user's own playing)
+
+- `sessions/demo_clair_de_lune/`: `clair_de_lune.wav` (normal) and
+  `clair_de_lune_sad.wav` (played again by the user, trying to sound sad),
+  analysed with clear names (`clair_de_lune.json`, `feedback_…`,
+  `expressive_…` with `--emotion sad`, `expression.json` comparing the two
+  with labels Normal / Sad version). `first_run/` holds the user's own
+  earlier run (`session_20261111_184056*`). It's a simplified arrangement
+  in C major (detected), not Debussy's D♭ original.
+- Results: normal → heard Q4 calm (32 %), sad 25 %; advice: softer touch,
+  more even dynamics, steadier pulse; what-if 25 % → 42 %. The sad take is
+  heard the same (calm 30 %, sad 24 %, same advice): timing almost
+  identical (performance 41.85 vs 41.87 s), velocity 77.6 vs 80.4, but
+  recording level −32.5 vs −43.2 dB. So the user changed mostly the level,
+  not the touch or tempo.
+- Figures for this demo: `figures/clair_de_lune/` (advice_example,
+  piano_roll_clair_de_lune).
+- Presentation: 10-minute mid-term talk in English; slides due 2026-11-12.
+  No Canva connector is available in Claude Code here; the plan is a .pptx
+  (or a claude.ai Slides deck downloaded as .pptx) imported into Canva.
+
+
+### 2026-11-10 (b): music21 default again; figures; decisions document
+
+- **Chords: music21 is the default again** (`chord_analysis.py`, `main.py`),
+  decided with the user from the real recording: RF never outputs sevenths
+  or dims on real audio (systematic bias), music21's errors aren't
+  systematic, and chords don't feed the expressive advice. RF stays as
+  `--chords rf` / `--backend rf`; `--backend both` saves music21's result.
+- **`make_figures.py` (new):** regenerates figures from the saved reports
+  into `figures/` (gitignored: reproducible, some derive from third-party
+  audio), PNG + PDF + `captions.md` with the current numbers:
+  emotion_model_comparison, emotion_confusion, emotion_feature_importance,
+  chord_eval_comparison, chord_eval_by_quality, advice_example,
+  piano_roll_demo. Colours: music21 / highlighted = #2a78d6, RF = #eb6834,
+  others neutral grey. All checked visually.
+- **`docs/decisions.md` (new):** the research goal (agreed with the user:
+  "design and evaluate how a system should give expressive advice…"),
+  scope and exclusions with justification (background noise, recognition
+  accuracy, real time, other instruments, LLM comparison), deferred work,
+  and one entry per design choice (decision, why, evidence, alternatives,
+  limits). **Keep it updated whenever a choice changes**: the supervisor
+  asked that every choice and exclusion be justified.
+- Tests: `test_make_figures.py`; 173 tests.
+
+
+### 2026-11-10: First real recording; supervisor feedback; new schedule
+
+- **Real chord take** (`sessions/session_20261109_163000.wav`, the 28-chord
+  protocol, report `models/chord_eval_recording_session_20261109_163000.md`):
+  RF root 100 %, majmin 100 %, sevenths 45 % (it never outputs a 7th chord
+  and turns every dim into min/maj); basic-pitch + music21 root 93 %,
+  majmin 100 %, sevenths 95 % (fails only on the 2 augmented chords, which
+  are ambiguous by nature, and chord 1 heard as C7). Opposite of the
+  rendered-progression test (RF far better in context).
+- **Supervisor feedback (to apply everywhere):** compare models in the
+  performance report; set a final goal and **justify every choice and every
+  exclusion** (e.g. if the research is the design of the advice, say why
+  background-noise robustness is out of scope). Measuring "ability to give
+  advice" as the performance criterion for choosing models can come later.
+- **Schedule:** mid-term presentation 2026-11-20; slides due 2026-11-12 for
+  a training session. The user does not want Claude to make the slides
+  now, only the work behind them.
+
 
 ### 2026-11-08 (b): Real-recording chord test; co-author lines removed from history
 

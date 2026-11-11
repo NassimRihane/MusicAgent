@@ -15,7 +15,9 @@ Only the last layer is original research. Everything it relies on uses widely us
 | 4. **Expressive feedback** | gap between intended and perceived emotion → prioritised advice | **this project's contribution** | `expressive_feedback.py` |
 | Coaching | conversation with the learner | local LLM (Ollama) or Azure OpenAI | `agent.py` |
 
-Supporting steps: correction feedback on notes, tempo and harmony (`feedback.py`), sheet music export (`json_to_score.py`), piano-roll images (`piano_roll.py`), and `main.py`, which runs everything in one command.
+Supporting steps: correction feedback on notes, tempo and harmony (`feedback.py`), sheet music export (`json_to_score.py`), piano-roll images (`piano_roll.py`), figures for presentations and papers (`make_figures.py`), and `main.py`, which runs everything in one command.
+
+Every design choice, what is out of scope and why, and the evidence behind each decision are in **[docs/decisions.md](docs/decisions.md)**.
 
 ### The emotion model
 
@@ -31,18 +33,20 @@ A Random Forest trained on [EMOPIA](https://zenodo.org/records/5257995) (1,078 p
 
 All classic classifiers reach a similar level, and the Random Forest is at least as good as the others. The most important descriptors are loudness (MIDI velocity) and major/minor mode. Training writes the full report (tables, confusion matrix figure, feature importances) to `models/emotion_rf_report.md` and `models/emotion_confusion.png`.
 
-### The chord model
+### The chord models
 
-A Random Forest on beat-synchronous chroma (librosa), trained on synthetic piano chords (85 classes: 12 roots × major, minor, diminished, augmented, dominant 7th, major 7th, minor 7th, plus "no chord"). Chords are then named and placed in the key with music21.
+Chords are named by **music21** from the transcribed notes (default). A **Random Forest** on beat-synchronous chroma (librosa), trained on synthetic piano chords (85 classes), is available as an alternative (`--chords rf`).
 
-No chord-annotated piano recordings are freely available, so `chord_evaluation.py` builds a test set whose chords are known exactly: progressions in random keys and tempos, in three textures, rendered with sampled piano sounds (FluidSynth, GeneralUser GS soundfont), which differ from the synthetic training sounds. Scores are the standard MIREX chord metrics computed with mir_eval (36 pieces, mean ± standard deviation):
+No chord-annotated piano recordings are freely available, so `chord_evaluation.py` tests both on (1) progressions in random keys and tempos, in three textures, rendered with sampled piano sounds (FluidSynth), and (2) a real piano recording of the 28 chords of [`protocols/chord_recording.md`](protocols/chord_recording.md). Scores are the standard MIREX chord metrics computed with mir_eval:
 
-| Recogniser | Root | Major/minor | Sevenths |
-|---|---|---|---|
-| **Random Forest** (audio) | **91.9 % ± 7.0** | **82.1 % ± 13.9** | **70.5 % ± 20.6** |
-| basic-pitch transcription + music21 naming | 52.1 % ± 17.2 | 52.2 % ± 16.2 | 36.2 % ± 22.2 |
+| Test | Recogniser | Root | Major/minor | Sevenths |
+|---|---|---|---|---|
+| Real piano, 28 isolated chords | **music21 (notes)** | 93 % | 100 % | **95 %** |
+| | Random Forest (audio) | 100 % | 100 % | 45 % |
+| Rendered progressions, 36 pieces | music21 (notes) | 52 % | 52 % | 36 % |
+| | Random Forest (audio) | 92 % | 82 % | 70 % |
 
-The Random Forest is therefore the default chord recogniser. The note-based alternative suffers from transcription: as a piano chord decays, basic-pitch ends the notes early and music21 names incomplete chords. Per-texture results are in `models/chord_eval_report.md`.
+The two tests disagree. music21 is the default because the real recording is the most direct evidence, and there the Random Forest never recognises a seventh chord (a systematic bias from its synthetic training data). The full reasoning is in [docs/decisions.md](docs/decisions.md).
 
 ### The expressive feedback (research part)
 
@@ -99,7 +103,7 @@ Emotions: happy, excited, tense, angry, sad, melancholic, calm, relaxed, tender�
 
 ```bash
 .venv311/bin/python transcription.py --audio take.mp3               # session JSON + WAV
-.venv311/bin/python chord_analysis.py sessions/session_X.json --backend both   # Random Forest vs music21
+.venv311/bin/python chord_analysis.py sessions/session_X.json --backend both   # music21 vs Random Forest
 .venv311/bin/python expressive_feedback.py sessions/session_X.json --emotion sad
 .venv311/bin/python emotion_model.py --predict take.mp3
 
@@ -109,6 +113,14 @@ Emotions: happy, excited, tense, angry, sad, melancholic, calm, relaxed, tender�
 # Piano rolls of any recordings, as an image
 .venv311/bin/python piano_roll.py happy.mp3 sad.mp3 --labels Happy Sad --title "Happy Birthday"
 ```
+
+### Figures
+
+```bash
+.venv311/bin/python make_figures.py   # figures/*.png (slides), figures/*.pdf (paper), figures/captions.md
+```
+
+The figures are regenerated from the saved reports (model comparison, confusion matrix, feature importance, chord evaluations, an advice example, piano rolls), each with a caption that includes the current numbers.
 
 ## Pipeline
 
@@ -127,8 +139,7 @@ Early experiments are in `prototypes/`.
 
 - EMOPIA is pop piano transcribed from YouTube recordings. Its notes include the sustain pedal and come from a different transcription system than basic-pitch, so typical values (articulation especially) are not directly comparable with our transcriptions.
 - Without the score of the piece, rhythm can only be judged as *stable or not*, not *correct*: an intentional rubato and an unsteady pulse look the same.
-- The chord evaluation uses rendered piano. A real-recording check is ready: play the 28 chords of [`protocols/chord_recording.md`](protocols/chord_recording.md), then run `python chord_evaluation.py --recording take.wav`. On cleanly held, isolated chords (rendered), the note-based path is better on sevenths (82 % vs 64 %); in musical context, the Random Forest is far better (table above).
-- The chord Random Forest's errors are mostly between major and minor, and on sevenths.
+- Chord recognition was tested on one real recording of isolated chords; music21 is weaker on chords played in context (rendered progressions).
 
 ## Tests
 
